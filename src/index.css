@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Cormorant Garamond", serif;
+}
+
+@layer base {
+  body {
+    @apply bg-[#fdfcf9] text-stone-900 font-sans;
+  }
+}
+
+.glass-card {
+  @apply bg-white/80 backdrop-blur-sm border border-stone-200/50 shadow-sm rounded-2xl;
+}
+
+.btn-primary {
+  @apply bg-emerald-700 hover:bg-emerald-800 text-white px-6 py-2.5 rounded-full font-medium transition-all active:scale-95;
+}
+
+.btn-secondary {
+  @apply bg-stone-100 hover:bg-stone-200 text-stone-700 px-6 py-2.5 rounded-full font-medium transition-all active:scale-95;
+}
