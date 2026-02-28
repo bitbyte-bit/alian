@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "start": "node server.js",
+    "start": "tsx server.ts",
     "build": "vite build",
+    "build:server": "tsc server.ts --outDir . --module commonjs --esModuleInterop --target es2020 --skipLibCheck",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
