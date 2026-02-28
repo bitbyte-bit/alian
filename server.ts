@@ -1,8 +1,8 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createServer as createViteServer } from "vite";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -127,7 +127,37 @@ db.exec(`
     amount REAL,
     message TEXT,
     date TEXT,
+    is_anonymous INTEGER DEFAULT 0,
     FOREIGN KEY(branch_id) REFERENCES branches(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT,
+    details TEXT,
+    date TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS impact_stories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    branch_id INTEGER,
+    title TEXT,
+    story TEXT,
+    beneficiary_name TEXT,
+    image TEXT,
+    date TEXT,
+    is_approved INTEGER DEFAULT 0,
+    FOREIGN KEY(branch_id) REFERENCES branches(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT,
+    reset_token TEXT,
+    expires_at TEXT,
+    is_used INTEGER DEFAULT 0
   );
 `);
 
@@ -174,17 +204,6 @@ async function startServer() {
   // --- API Routes ---
 
   // Auth (Simplified for demo)
-  app.post("/api/auth/register", (req, res) => {
-    const { email, password, name } = req.body;
-    try {
-      const info = db.prepare("INSERT INTO users (email, password, name) VALUES (?, ?, ?)").run(email, password, name);
-      db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(info.lastInsertRowid);
-      res.json({ success: true, userId: info.lastInsertRowid });
-    } catch (e) {
-      res.status(400).json({ error: "Email already exists" });
-    }
-  });
-
   app.post("/api/auth/login", (req, res) => {
     const { email, password } = req.body;
     const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password) as any;
@@ -369,8 +388,22 @@ async function startServer() {
 
   app.post("/api/account/deposit", (req, res) => {
     const { userId, amount } = req.body;
+    
+    // Server-side validation
+    const errors = validateInput({ amount }, {
+      amount: (v) => typeof v === 'number' && v > 0
+    });
+    
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors.join(', ') });
+    }
+    
     db.prepare("UPDATE accounts SET balance = balance + ? WHERE user_id = ?").run(amount, userId);
     db.prepare("INSERT INTO transactions (user_id, type, amount, date) VALUES (?, 'deposit', ?, ?)").run(userId, amount, new Date().toISOString());
+    
+    // Add to audit log
+    db.prepare("INSERT INTO audit_logs (user_id, action, details, date) VALUES (?, ?, ?, ?)").run(userId, 'deposit', `Deposited ${amount}`, new Date().toISOString());
+    
     res.json({ success: true });
   });
 
@@ -391,16 +424,29 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // Withdrawal from savings
+  app.post("/api/account/withdraw", (req, res) => {
+    const { userId, amount } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+    const account = db.prepare("SELECT balance FROM accounts WHERE user_id = ?").get(userId) as any;
+    if (!account || account.balance < amount) {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+    db.prepare("UPDATE accounts SET balance = balance - ? WHERE user_id = ?").run(amount, userId);
+    db.prepare("INSERT INTO transactions (user_id, type, amount, date) VALUES (?, 'withdrawal', ?, ?)").run(userId, amount, new Date().toISOString());
+    
+    // Add to audit log
+    db.prepare("INSERT INTO audit_logs (user_id, action, details, date) VALUES (?, ?, ?, ?)").run(userId, 'withdrawal', `Withdrew ${amount}`, new Date().toISOString());
+    
+    res.json({ success: true });
+  });
+
   // Donations
   app.get("/api/donations", (req, res) => {
     const donations = db.prepare("SELECT * FROM donations ORDER BY date DESC LIMIT 10").all();
     res.json(donations);
-  });
-
-  app.post("/api/donations", (req, res) => {
-    const { donorName, amount, message } = req.body;
-    db.prepare("INSERT INTO donations (donor_name, amount, date, message) VALUES (?, ?, ?, ?)").run(donorName, amount, new Date().toISOString(), message);
-    res.json({ success: true });
   });
 
   // Branches
@@ -443,9 +489,9 @@ async function startServer() {
   });
 
   app.post("/api/branches/:id/donate", (req, res) => {
-    const { donorName, amount, message } = req.body;
-    db.prepare("INSERT INTO regional_donations (branch_id, donor_name, amount, message, date) VALUES (?, ?, ?, ?, ?)")
-      .run(req.params.id, donorName, amount, message, new Date().toISOString());
+    const { donorName, amount, message, isAnonymous } = req.body;
+    db.prepare("INSERT INTO regional_donations (branch_id, donor_name, amount, message, date, is_anonymous) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(req.params.id, donorName, amount, message, new Date().toISOString(), isAnonymous ? 1 : 0);
     res.json({ success: true });
   });
 
@@ -453,6 +499,215 @@ async function startServer() {
     const { requesterName, contact, needDescription } = req.body;
     db.prepare("INSERT INTO regional_requests (branch_id, requester_name, contact, need_description, date) VALUES (?, ?, ?, ?, ?)")
       .run(req.params.id, requesterName, contact, needDescription, new Date().toISOString());
+    res.json({ success: true });
+  });
+
+  // Password Reset
+  app.post("/api/auth/forgot-password", (req, res) => {
+    const { email } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+    if (!user) {
+      return res.status(404).json({ error: "Email not found" });
+    }
+    const resetToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const expiresAt = new Date(Date.now() + 3600000).toISOString(); // 1 hour
+    db.prepare("INSERT INTO password_resets (email, reset_token, expires_at) VALUES (?, ?, ?)")
+      .run(email, resetToken, expiresAt);
+    // In production, send email with reset link
+    res.json({ success: true, message: "Password reset link sent to email", token: resetToken });
+  });
+
+  app.post("/api/auth/reset-password", (req, res) => {
+    const { token, newPassword } = req.body;
+    const reset = db.prepare("SELECT * FROM password_resets WHERE reset_token = ? AND is_used = 0").get(token) as any;
+    if (!reset) {
+      return res.status(400).json({ error: "Invalid or used token" });
+    }
+    if (new Date(reset.expires_at) < new Date()) {
+      return res.status(400).json({ error: "Token expired" });
+    }
+    db.prepare("UPDATE users SET password = ? WHERE email = ?").run(newPassword, reset.email);
+    db.prepare("UPDATE password_resets SET is_used = 1 WHERE id = ?").run(reset.id);
+    res.json({ success: true, message: "Password reset successful" });
+  });
+
+  // Search
+  app.get("/api/search", (req, res) => {
+    const { q } = req.query;
+    if (!q || typeof q !== 'string') {
+      return res.status(400).json({ error: "Search query required" });
+    }
+    const searchTerm = `%${q}%`;
+    const branches = db.prepare("SELECT id, region, location FROM branches WHERE region LIKE ? OR location LIKE ?").all(searchTerm, searchTerm);
+    const users = db.prepare("SELECT id, name, email, role FROM users WHERE name LIKE ? OR email LIKE ?").all(searchTerm, searchTerm);
+    const donations = db.prepare("SELECT * FROM donations WHERE donor_name LIKE ? OR message LIKE ? ORDER BY date DESC LIMIT 10").all(searchTerm, searchTerm);
+    res.json({ branches, users, donations });
+  });
+
+  // Analytics for Master Admin
+  app.get("/api/admin/master/analytics", (req, res) => {
+    const totalDonations = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM donations").get() as any;
+    const totalRegionalDonations = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM regional_donations").get() as any;
+    const totalUsers = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'user'").get() as any;
+    const totalOfficers = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'regional_officer'").get() as any;
+    const totalBranches = db.prepare("SELECT COUNT(*) as count FROM branches").get() as any;
+    const pendingApplications = db.prepare("SELECT COUNT(*) as count FROM donation_applications WHERE status = 'pending'").get() as any;
+    const approvedApplications = db.prepare("SELECT COUNT(*) as count FROM donation_applications WHERE status = 'replied'").get() as any;
+    const totalSavings = db.prepare("SELECT COALESCE(SUM(balance), 0) as total FROM accounts").get() as any;
+    
+    // Monthly donations for the last 6 months
+    const monthlyDonations = db.prepare(`
+      SELECT strftime('%Y-%m', date) as month, SUM(amount) as total 
+      FROM donations 
+      WHERE date >= date('now', '-6 months') 
+      GROUP BY month ORDER BY month
+    `).all();
+    
+    res.json({
+      totalDonations: totalDonations.total,
+      totalRegionalDonations: totalRegionalDonations.total,
+      totalUsers: totalUsers.count,
+      totalOfficers: totalOfficers.count,
+      totalBranches: totalBranches.count,
+      pendingApplications: pendingApplications.count,
+      approvedApplications: approvedApplications.count,
+      totalSavings: totalSavings.total,
+      monthlyDonations
+    });
+  });
+
+  // Impact Stories
+  app.get("/api/impact-stories", (req, res) => {
+    const stories = db.prepare("SELECT * FROM impact_stories WHERE is_approved = 1 ORDER BY date DESC").all();
+    res.json(stories);
+  });
+
+  app.get("/api/admin/master/impact-stories", (req, res) => {
+    const stories = db.prepare("SELECT * FROM impact_stories ORDER BY date DESC").all();
+    res.json(stories);
+  });
+
+  app.post("/api/admin/master/impact-stories", (req, res) => {
+    const { branchId, title, story, beneficiaryName, image } = req.body;
+    db.prepare("INSERT INTO impact_stories (branch_id, title, story, beneficiary_name, image, date, is_approved) VALUES (?, ?, ?, ?, ?, ?, 1)")
+      .run(branchId, title, story, beneficiaryName, image, new Date().toISOString());
+    res.json({ success: true });
+  });
+
+  app.put("/api/admin/master/impact-stories/:id", (req, res) => {
+    const { title, story, beneficiaryName, image, isApproved } = req.body;
+    db.prepare("UPDATE impact_stories SET title = ?, story = ?, beneficiary_name = ?, image = ?, is_approved = ? WHERE id = ?")
+      .run(title, story, beneficiaryName, image, isApproved ? 1 : 0, req.params.id);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/admin/master/impact-stories/:id", (req, res) => {
+    db.prepare("DELETE FROM impact_stories WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  // Transaction History
+  app.get("/api/transactions/:userId", (req, res) => {
+    const transactions = db.prepare("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC").all(req.params.userId);
+    res.json(transactions);
+  });
+
+  // Generate Receipt
+  app.get("/api/receipt/:transactionId", (req, res) => {
+    const transaction = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.transactionId) as any;
+    if (!transaction) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+    const user = db.prepare("SELECT name, email FROM users WHERE id = ?").get(transaction.user_id) as any;
+    
+    const receipt = {
+      receiptId: `RCP-${transaction.id}-${Date.now()}`,
+      transactionId: transaction.id,
+      userName: user?.name || 'N/A',
+      userEmail: user?.email || 'N/A',
+      type: transaction.type,
+      amount: transaction.amount,
+      date: transaction.date,
+      organization: "Arise and Shine Ministries International",
+      message: "Thank you for your support!"
+    };
+    res.json(receipt);
+  });
+
+  // Regional Requests - Get all for branch
+  app.get("/api/branches/:id/requests", (req, res) => {
+    const requests = db.prepare("SELECT * FROM regional_requests WHERE branch_id = ? ORDER BY date DESC").all(req.params.id);
+    res.json(requests);
+  });
+
+  // Regional Requests - Update status
+  app.put("/api/admin/regional/requests/:id", (req, res) => {
+    const { status } = req.body;
+    db.prepare("UPDATE regional_requests SET status = ? WHERE id = ?").run(status, req.params.id);
+    res.json({ success: true });
+  });
+
+  // Regional Donations - Get all for branch (public)
+  app.get("/api/branches/:id/donations", (req, res) => {
+    const donations = db.prepare("SELECT id, donor_name, amount, message, date, is_anonymous FROM regional_donations WHERE branch_id = ? ORDER BY date DESC").all(req.params.id);
+    res.json(donations);
+  });
+
+  // Audit Logs
+  app.get("/api/admin/master/audit-logs", (req, res) => {
+    const logs = db.prepare("SELECT al.*, u.name as user_name FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id ORDER BY al.date DESC LIMIT 100").all();
+    res.json(logs);
+  });
+
+  // Input Validation Helper
+  const validateInput = (data: any, rules: Record<string, (val: any) => boolean>) => {
+    const errors: string[] = [];
+    for (const [field, validator] of Object.entries(rules)) {
+      if (!validator(data[field])) {
+        errors.push(`Invalid ${field}`);
+      }
+    }
+    return errors;
+  };
+
+  // Apply validation to registration
+  app.post("/api/auth/register", (req, res) => {
+    const { email, password, name } = req.body;
+    
+    // Server-side validation
+    const errors = validateInput({ email, password, name }, {
+      email: (v) => typeof v === 'string' && v.includes('@'),
+      password: (v) => typeof v === 'string' && v.length >= 4,
+      name: (v) => typeof v === 'string' && v.length >= 2
+    });
+    
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors.join(', ') });
+    }
+    
+    try {
+      const info = db.prepare("INSERT INTO users (email, password, name) VALUES (?, ?, ?)").run(email, password, name);
+      db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(info.lastInsertRowid);
+      res.json({ success: true, userId: info.lastInsertRowid });
+    } catch (e) {
+      res.status(400).json({ error: "Email already exists" });
+    }
+  });
+
+  // Apply validation to donations
+  app.post("/api/donations", (req, res) => {
+    const { donorName, amount, message, isAnonymous } = req.body;
+    
+    const errors = validateInput({ amount }, {
+      amount: (v) => typeof v === 'number' && v > 0
+    });
+    
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors.join(', ') });
+    }
+    
+    const name = isAnonymous ? 'Anonymous' : donorName;
+    db.prepare("INSERT INTO donations (donor_name, amount, date, message) VALUES (?, ?, ?, ?)").run(name, amount, new Date().toISOString(), message);
     res.json({ success: true });
   });
 
@@ -471,19 +726,11 @@ async function startServer() {
     }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
-  }
+  // Serve static files from dist folder (production)
+  app.use(express.static(path.join(__dirname, "dist")));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "dist", "index.html"));
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);

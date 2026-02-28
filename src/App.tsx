@@ -27,12 +27,13 @@ import {
   Edit,
   Send,
   ArrowRight,
-  ExternalLink
+  ExternalLink,
+  Search
 } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import type { User, Account, Donation, Branch, Transaction, Activity, Resource, DonationApplication } from './types';
+import type { User, Account, Donation, Branch, Transaction, Activity, Resource, DonationApplication, ImpactStory } from './types';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -82,6 +83,21 @@ const ConfirmationDialog = ({
 
 const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<{branches: any[]; users: any[]; donations: any[]}>({ branches: [], users: [], donations: [] });
+  const navigate = useNavigate();
+
+  const handleSearch = async (query: string) => {
+    setSearchQuery(query);
+    if (query.length < 2) {
+      setSearchResults({ branches: [], users: [], donations: [] });
+      return;
+    }
+    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    setSearchResults(data);
+  };
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-md border-b border-stone-100">
@@ -94,7 +110,11 @@ const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void })
 
           <div className="hidden md:flex items-center gap-8">
             <Link to="/donations" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Donations</Link>
+            <Link to="/stories" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Impact Stories</Link>
             <Link to="/branches" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Branches</Link>
+            <button onClick={() => setShowSearch(true)} className="text-stone-600 hover:text-emerald-700 transition-colors">
+              <Search className="w-5 h-5" />
+            </button>
             {user ? (
               <>
                 {user.role === 'user' && <Link to="/dashboard" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Savings</Link>}
@@ -137,6 +157,7 @@ const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void })
             className="md:hidden bg-white border-b border-stone-100 px-4 py-6 flex flex-col gap-4"
           >
             <Link to="/donations" onClick={() => setIsOpen(false)} className="text-lg font-medium">Donations</Link>
+            <Link to="/stories" onClick={() => setIsOpen(false)} className="text-lg font-medium">Impact Stories</Link>
             <Link to="/branches" onClick={() => setIsOpen(false)} className="text-lg font-medium">Branches</Link>
             {user ? (
               <>
@@ -149,6 +170,73 @@ const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void })
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Search Modal */}
+      {showSearch && (
+        <div className="fixed inset-0 z-[100] flex items-start justify-center pt-24 p-4 bg-black/50 backdrop-blur-sm" onClick={() => setShowSearch(false)}>
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0, y: -20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            className="bg-white rounded-3xl p-6 w-full max-w-2xl shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-4 mb-6">
+              <Search className="w-6 h-6 text-stone-400" />
+              <input 
+                type="text" 
+                placeholder="Search branches, donations, users..."
+                className="flex-1 text-xl outline-none"
+                value={searchQuery}
+                onChange={e => handleSearch(e.target.value)}
+                autoFocus
+              />
+              <button onClick={() => setShowSearch(false)}><X className="w-6 h-6 text-stone-400" /></button>
+            </div>
+            
+            {(searchResults.branches.length > 0 || searchResults.donations.length > 0) && (
+              <div className="max-h-96 overflow-y-auto">
+                {searchResults.branches.length > 0 && (
+                  <div className="mb-6">
+                    <h4 className="text-sm font-bold text-stone-500 uppercase mb-3">Branches</h4>
+                    {searchResults.branches.map((branch: any) => (
+                      <Link 
+                        key={branch.id} 
+                        to={`/branch/${branch.id}`}
+                        onClick={() => setShowSearch(false)}
+                        className="flex items-center gap-3 p-3 hover:bg-stone-50 rounded-xl"
+                      >
+                        <MapPin className="w-5 h-5 text-emerald-600" />
+                        <div>
+                          <p className="font-bold">{branch.region}</p>
+                          <p className="text-sm text-stone-500">{branch.location}</p>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+                {searchResults.donations.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-bold text-stone-500 uppercase mb-3">Donations</h4>
+                    {searchResults.donations.map((donation: any) => (
+                      <div key={donation.id} className="flex items-center gap-3 p-3 hover:bg-stone-50 rounded-xl">
+                        <Heart className="w-5 h-5 text-emerald-600" />
+                        <div>
+                          <p className="font-bold">{donation.donor_name}</p>
+                          <p className="text-sm text-stone-500">UGX {donation.amount?.toLocaleString()} - {new Date(donation.date).toLocaleDateString()}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {searchQuery.length >= 2 && searchResults.branches.length === 0 && searchResults.donations.length === 0 && (
+              <p className="text-center text-stone-500 py-8">No results found</p>
+            )}
+          </motion.div>
+        </div>
+      )}
     </nav>
   );
 };
@@ -304,6 +392,70 @@ const DonationsPage = () => {
   );
 };
 
+const ImpactStoriesPage = () => {
+  const [stories, setStories] = useState<ImpactStory[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('/api/impact-stories')
+      .then(res => res.json())
+      .then(data => {
+        setStories(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="pt-24 text-center">Loading stories...</div>;
+
+  return (
+    <div className="pt-24 pb-16 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="text-center mb-16">
+        <h2 className="text-4xl font-serif font-bold mb-4">Impact Stories</h2>
+        <p className="text-stone-600 max-w-2xl mx-auto">
+          Read about the lives changed through your generous donations and support.
+        </p>
+      </div>
+
+      {stories.length === 0 ? (
+        <div className="text-center py-16">
+          <Heart className="w-16 h-16 text-stone-300 mx-auto mb-4" />
+          <p className="text-stone-500">No impact stories yet. Check back soon!</p>
+        </div>
+      ) : (
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+          {stories.map(story => (
+            <motion.div 
+              key={story.id}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card overflow-hidden"
+            >
+              {story.image && (
+                <div className="h-48 overflow-hidden">
+                  <img src={story.image} alt={story.title} className="w-full h-full object-cover" />
+                </div>
+              )}
+              <div className="p-6">
+                <h3 className="font-serif font-bold text-xl mb-3">{story.title}</h3>
+                <p className="text-stone-600 text-sm mb-4 line-clamp-4">{story.story}</p>
+                {story.beneficiary_name && (
+                  <p className="text-sm text-stone-500">
+                    <span className="font-bold">Beneficiary:</span> {story.beneficiary_name}
+                  </p>
+                )}
+                <p className="text-xs text-stone-400 mt-4">
+                  {new Date(story.date).toLocaleDateString()}
+                </p>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const BranchesPage = () => {
   const [branches, setBranches] = useState<Branch[]>([]);
 
@@ -375,7 +527,7 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
   const [branch, setBranch] = useState<Branch | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({ officerName: '', officerBio: '', officerPhoto: '' });
-  const [donationForm, setDonationForm] = useState({ donorName: '', amount: '', message: '' });
+  const [donationForm, setDonationForm] = useState({ donorName: '', amount: '', message: '', isAnonymous: false });
   const [requestForm, setRequestForm] = useState({ requesterName: '', contact: '', needDescription: '' });
   const [activeTab, setActiveTab] = useState<'activities' | 'resources' | 'forms'>('activities');
 
@@ -419,7 +571,7 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...donationForm, amount: parseFloat(donationForm.amount) })
     });
-    setDonationForm({ donorName: '', amount: '', message: '' });
+    setDonationForm({ donorName: '', amount: '', message: '', isAnonymous: false });
     alert('Thank you for your regional donation!');
   };
 
@@ -613,13 +765,15 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
                     <Heart className="w-5 h-5 text-emerald-600" /> Donate to {branch.region}
                   </h4>
                   <form onSubmit={handleDonation} className="space-y-4">
-                    <input 
-                      className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm"
-                      placeholder="Your Name"
-                      required
-                      value={donationForm.donorName}
-                      onChange={e => setDonationForm({...donationForm, donorName: e.target.value})}
-                    />
+                    {!donationForm.isAnonymous && (
+                      <input 
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm"
+                        placeholder="Your Name"
+                        required
+                        value={donationForm.donorName}
+                        onChange={e => setDonationForm({...donationForm, donorName: e.target.value})}
+                      />
+                    )}
                     <input 
                       type="number"
                       className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm"
@@ -634,6 +788,16 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
                       value={donationForm.message}
                       onChange={e => setDonationForm({...donationForm, message: e.target.value})}
                     />
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="checkbox" 
+                        id="isAnonymous"
+                        className="w-4 h-4 text-emerald-600 rounded border-stone-300"
+                        checked={donationForm.isAnonymous} 
+                        onChange={e => setDonationForm({...donationForm, isAnonymous: e.target.checked, donorName: e.target.checked ? '' : donationForm.donorName})} 
+                      />
+                      <label htmlFor="isAnonymous" className="text-sm text-stone-600">Make this donation anonymous</label>
+                    </div>
                     <button type="submit" className="btn-primary w-full py-2 text-sm">Submit Donation</button>
                   </form>
                 </div>
@@ -668,9 +832,13 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
 const Dashboard = ({ user }: { user: User }) => {
   const [account, setAccount] = useState<Account | null>(null);
   const [depositAmount, setDepositAmount] = useState('');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
   const [manualPayAmount, setManualPayAmount] = useState('2000');
   const [loading, setLoading] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showWithdrawConfirm, setShowWithdrawConfirm] = useState(false);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [showReceipt, setShowReceipt] = useState<any>(null);
 
   const fetchAccount = async () => {
     const res = await fetch(`/api/account/${user.id}`);
@@ -678,7 +846,16 @@ const Dashboard = ({ user }: { user: User }) => {
     setAccount(data);
   };
 
-  useEffect(() => { fetchAccount(); }, [user.id]);
+  const fetchTransactions = async () => {
+    const res = await fetch(`/api/transactions/${user.id}`);
+    const data = await res.json();
+    setTransactions(data);
+  };
+
+  useEffect(() => { 
+    fetchAccount(); 
+    fetchTransactions();
+  }, [user.id]);
 
   const handleDeposit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -690,6 +867,34 @@ const Dashboard = ({ user }: { user: User }) => {
     });
     setDepositAmount('');
     fetchAccount();
+    fetchTransactions();
+    setLoading(false);
+  };
+
+  const handleWithdraw = async () => {
+    setShowWithdrawConfirm(false);
+    setLoading(true);
+    const res = await fetch('/api/account/withdraw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id, amount: parseFloat(withdrawAmount) })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.error || 'Withdrawal failed');
+    } else {
+      // Get the latest transaction for receipt
+      const txRes = await fetch(`/api/transactions/${user.id}`);
+      const txs = await txRes.json();
+      if (txs.length > 0) {
+        const receiptRes = await fetch(`/api/receipt/${txs[0].id}`);
+        const receipt = await receiptRes.json();
+        setShowReceipt(receipt);
+      }
+    }
+    setWithdrawAmount('');
+    fetchAccount();
+    fetchTransactions();
     setLoading(false);
   };
 
@@ -712,6 +917,7 @@ const Dashboard = ({ user }: { user: User }) => {
     });
     if (!res.ok) alert('Insufficient balance');
     fetchAccount();
+    fetchTransactions();
     setLoading(false);
   };
 
@@ -739,6 +945,13 @@ const Dashboard = ({ user }: { user: User }) => {
                     Deposit
                   </button>
                 </form>
+                <button 
+                  onClick={() => setShowWithdrawConfirm(true)}
+                  disabled={account.balance <= 0}
+                  className="bg-emerald-700 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-600 transition-colors disabled:opacity-50"
+                >
+                  Withdraw
+                </button>
               </div>
             </div>
             <div className="absolute -right-20 -bottom-20 w-64 h-64 bg-emerald-800 rounded-full opacity-50 blur-3xl"></div>
@@ -799,6 +1012,66 @@ const Dashboard = ({ user }: { user: User }) => {
           message={`Are you sure you want to pay UGX ${parseFloat(manualPayAmount).toLocaleString()} to ASMIN collection? This transaction cannot be undone.`}
         />
 
+        <ConfirmationDialog 
+          isOpen={showWithdrawConfirm}
+          onClose={() => setShowWithdrawConfirm(false)}
+          onConfirm={handleWithdraw}
+          title="Confirm Withdrawal"
+          message={`Are you sure you want to withdraw UGX ${withdrawAmount ? parseFloat(withdrawAmount).toLocaleString() : '0'} from your savings? This transaction cannot be undone.`}
+          confirmText="Withdraw"
+        />
+
+        {/* Withdrawal Input Modal */}
+        {account.balance > 0 && (
+          <div className="fixed bottom-8 right-8 z-50">
+            <div className="bg-white rounded-2xl shadow-xl p-4 border border-stone-100">
+              <p className="text-sm font-bold text-stone-700 mb-2">Quick Withdraw</p>
+              <div className="flex gap-2">
+                <input 
+                  type="number" 
+                  placeholder="Amount"
+                  className="px-3 py-2 rounded-xl border border-stone-200 outline-none text-sm w-32"
+                  value={withdrawAmount}
+                  onChange={e => setWithdrawAmount(e.target.value)}
+                />
+                <button 
+                  onClick={() => setShowWithdrawConfirm(true)}
+                  disabled={!withdrawAmount || parseFloat(withdrawAmount) <= 0 || parseFloat(withdrawAmount) > account.balance}
+                  className="bg-red-500 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-red-600 transition-colors disabled:opacity-50"
+                >
+                  Withdraw
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Receipt Modal */}
+        {showReceipt && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl"
+            >
+              <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600 mb-6">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <h3 className="text-2xl font-serif font-bold mb-2">Transaction Successful!</h3>
+              <div className="bg-stone-50 rounded-2xl p-6 mb-6">
+                <p className="text-sm text-stone-500 mb-1">Receipt ID</p>
+                <p className="font-mono text-lg font-bold text-stone-900 mb-4">{showReceipt.receiptId}</p>
+                <p className="text-sm text-stone-500 mb-1">Amount</p>
+                <p className="text-2xl font-bold text-emerald-700 mb-4">UGX {showReceipt.amount?.toLocaleString()}</p>
+                <p className="text-sm text-stone-500 mb-1">Date</p>
+                <p className="text-stone-900">{new Date(showReceipt.date).toLocaleDateString()}</p>
+              </div>
+              <p className="text-center text-stone-500 text-sm mb-6">{showReceipt.message}</p>
+              <button onClick={() => setShowReceipt(null)} className="btn-primary w-full">Close</button>
+            </motion.div>
+          </div>
+        )}
+
         {/* Sidebar Info */}
         <div className="space-y-8">
           <div className="glass-card p-8">
@@ -818,6 +1091,60 @@ const Dashboard = ({ user }: { user: User }) => {
               Find My Branch
             </Link>
           </div>
+        </div>
+      </div>
+
+      {/* Transaction History */}
+      <div className="mt-8">
+        <div className="glass-card p-8">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-2xl font-serif font-bold">Transaction History</h3>
+            <FileText className="w-5 h-5 text-stone-400" />
+          </div>
+          {transactions.length === 0 ? (
+            <p className="text-stone-500 text-center py-8">No transactions yet</p>
+          ) : (
+            <div className="space-y-3">
+              {transactions.slice(0, 10).map((tx) => (
+                <div key={tx.id} className="flex items-center justify-between p-4 bg-stone-50 rounded-xl">
+                  <div className="flex items-center gap-4">
+                    <div className={cn(
+                      "w-10 h-10 rounded-full flex items-center justify-center",
+                      tx.type === 'deposit' ? "bg-emerald-100 text-emerald-600" :
+                      tx.type === 'withdrawal' ? "bg-red-100 text-red-600" :
+                      "bg-blue-100 text-blue-600"
+                    )}>
+                      {tx.type === 'deposit' ? <ArrowUpRight className="w-5 h-5" /> : 
+                       tx.type === 'withdrawal' ? <ArrowRight className="w-5 h-5" /> :
+                       <PiggyBank className="w-5 h-5" />}
+                    </div>
+                    <div>
+                      <p className="font-bold text-stone-900 capitalize">{tx.type.replace('_', ' ')}</p>
+                      <p className="text-sm text-stone-500">{new Date(tx.date).toLocaleDateString()}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className={cn(
+                      "font-bold",
+                      tx.type === 'deposit' ? "text-emerald-600" : "text-stone-900"
+                    )}>
+                      {tx.type === 'deposit' ? '+' : '-'} UGX {tx.amount.toLocaleString()}
+                    </p>
+                    <button 
+                      onClick={async () => {
+                        const res = await fetch(`/api/receipt/${tx.id}`);
+                        const receipt = await res.json();
+                        setShowReceipt(receipt);
+                      }}
+                      className="text-xs text-emerald-600 hover:underline"
+                    >
+                      View Receipt
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1588,6 +1915,10 @@ const MasterAdminDashboard = () => {
   const [data, setData] = useState<any>(null);
   const [officers, setOfficers] = useState<any[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
+  const [analytics, setAnalytics] = useState<any>(null);
+  const [impactStories, setImpactStories] = useState<any[]>([]);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'overview' | 'branches' | 'officers' | 'analytics' | 'stories' | 'audit'>('overview');
   const [newOfficer, setNewOfficer] = useState({ name: '', email: '', password: '', branchName: '', isHeadOffice: false });
   const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
   const [branchForm, setBranchForm] = useState({
@@ -1603,17 +1934,29 @@ const MasterAdminDashboard = () => {
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
 
   const fetchData = async () => {
-    const [res1, res2, res3] = await Promise.all([
+    const [res1, res2, res3, res4, res5] = await Promise.all([
       fetch('/api/admin/master/all-activities'),
       fetch('/api/admin/master/officers'),
-      fetch('/api/admin/master/branches')
+      fetch('/api/admin/master/branches'),
+      fetch('/api/admin/master/analytics'),
+      fetch('/api/admin/master/audit-logs')
     ]);
     setData(await res1.json());
     setOfficers(await res2.json());
     setBranches(await res3.json());
+    setAnalytics(await res4.json());
+    setAuditLogs(await res5.json());
   };
 
-  useEffect(() => { fetchData(); }, []);
+  const fetchImpactStories = async () => {
+    const res = await fetch('/api/admin/master/impact-stories');
+    setImpactStories(await res.json());
+  };
+
+  useEffect(() => { 
+    fetchData(); 
+    fetchImpactStories();
+  }, []);
 
   const handleUpdateBranch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1987,6 +2330,11 @@ const MasterAdminDashboard = () => {
 
 const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
   const [isLogin, setIsLogin] = useState(true);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetMessage, setResetMessage] = useState('');
   const [formData, setFormData] = useState({ email: '', password: '', name: '' });
   const [error, setError] = useState('');
   const navigate = useNavigate();
@@ -2015,6 +2363,78 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
       setError(data.error || 'Something went wrong');
     }
   };
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    const res = await fetch('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: resetEmail })
+    });
+    const data = await res.json();
+    if (data.success) {
+      setResetMessage(data.message);
+      setShowForgotPassword(false);
+      setResetToken(data.token);
+    } else {
+      setError(data.error || 'Failed to send reset email');
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    const res = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: resetToken, newPassword })
+    });
+    const data = await res.json();
+    if (data.success) {
+      alert('Password reset successful! Please login.');
+      setResetToken('');
+      setNewPassword('');
+    } else {
+      setError(data.error || 'Failed to reset password');
+    }
+  };
+
+  if (resetToken) {
+    return (
+      <div className="pt-32 pb-16 flex justify-center px-4">
+        <div className="w-full max-w-md">
+          <div className="text-center mb-10">
+            <h2 className="text-3xl font-serif font-bold mb-2">Reset Password</h2>
+            <p className="text-stone-500">Enter your new password</p>
+          </div>
+          <div className="glass-card p-8">
+            <form onSubmit={handleResetPassword} className="space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">New Password</label>
+                <input 
+                  type="password" 
+                  required
+                  className="w-full px-4 py-3 rounded-xl border border-stone-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                />
+              </div>
+              {error && <p className="text-red-500 text-sm">{error}</p>}
+              <button type="submit" className="btn-primary w-full py-4 text-lg">
+                Reset Password
+              </button>
+            </form>
+            <div className="mt-6 text-center">
+              <button onClick={() => setResetToken('')} className="text-stone-500 hover:text-emerald-700 font-medium">
+                Back to Login
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="pt-32 pb-16 flex justify-center px-4">
@@ -2058,7 +2478,15 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
                 onChange={e => setFormData({...formData, password: e.target.value})}
               />
             </div>
+            {isLogin && (
+              <div className="text-right">
+                <button type="button" onClick={() => setShowForgotPassword(true)} className="text-sm text-emerald-600 hover:underline">
+                  Forgot Password?
+                </button>
+              </div>
+            )}
             {error && <p className="text-red-500 text-sm">{error}</p>}
+            {resetMessage && <p className="text-emerald-600 text-sm">{resetMessage}</p>}
             <button type="submit" className="btn-primary w-full py-4 text-lg">
               {isLogin ? 'Login' : 'Create Account'}
             </button>
@@ -2072,6 +2500,41 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
               {isLogin ? "Don't have an account? Sign up" : "Already have an account? Login"}
             </button>
           </div>
+
+          {/* Forgot Password Modal */}
+          {showForgotPassword && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl"
+              >
+                <h3 className="text-2xl font-serif font-bold mb-4">Reset Password</h3>
+                <p className="text-stone-600 mb-6">Enter your email address and we'll send you a reset link.</p>
+                <form onSubmit={handleForgotPassword} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-stone-700 mb-2">Email Address</label>
+                    <input 
+                      type="email" 
+                      required
+                      className="w-full px-4 py-3 rounded-xl border border-stone-200 outline-none focus:ring-2 focus:ring-emerald-500"
+                      value={resetEmail}
+                      onChange={e => setResetEmail(e.target.value)}
+                    />
+                  </div>
+                  {error && <p className="text-red-500 text-sm">{error}</p>}
+                  <div className="flex gap-4">
+                    <button type="button" onClick={() => setShowForgotPassword(false)} className="btn-secondary flex-1">
+                      Cancel
+                    </button>
+                    <button type="submit" className="btn-primary flex-1">
+                      Send Link
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -2118,6 +2581,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/donations" element={<DonationsPage />} />
+            <Route path="/stories" element={<ImpactStoriesPage />} />
             <Route path="/branches" element={<BranchesPage />} />
             <Route path="/branch/:id" element={<BranchDetailPage user={user} />} />
             <Route path="/branch/:id/apply" element={<DonationApplicationForm />} />

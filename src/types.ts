@@ -80,7 +80,77 @@ export interface Resource {
 export interface Transaction {
   id: number;
   user_id: number;
-  type: 'deposit' | 'asmin_collection';
+  type: 'deposit' | 'asmin_collection' | 'withdrawal';
   amount: number;
   date: string;
+}
+
+export interface ImpactStory {
+  id: number;
+  branch_id: number;
+  title: string;
+  story: string;
+  beneficiary_name: string;
+  image: string;
+  date: string;
+  is_approved: number;
+}
+
+export interface RegionalRequest {
+  id: number;
+  branch_id: number;
+  requester_name: string;
+  contact: string;
+  need_description: string;
+  status: string;
+  date: string;
+}
+
+export interface RegionalDonation {
+  id: number;
+  branch_id: number;
+  donor_name: string;
+  amount: number;
+  message: string;
+  date: string;
+  is_anonymous: number;
+}
+
+export interface AuditLog {
+  id: number;
+  user_id: number;
+  action: string;
+  details: string;
+  date: string;
+  user_name?: string;
+}
+
+export interface Analytics {
+  totalDonations: number;
+  totalRegionalDonations: number;
+  totalUsers: number;
+  totalOfficers: number;
+  totalBranches: number;
+  pendingApplications: number;
+  approvedApplications: number;
+  totalSavings: number;
+  monthlyDonations: { month: string; total: number }[];
+}
+
+export interface Receipt {
+  receiptId: string;
+  transactionId: number;
+  userName: string;
+  userEmail: string;
+  type: string;
+  amount: number;
+  date: string;
+  organization: string;
+  message: string;
+}
+
+export interface SearchResults {
+  branches: Branch[];
+  users: User[];
+  donations: Donation[];
 }
