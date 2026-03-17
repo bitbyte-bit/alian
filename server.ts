@@ -1,8 +1,10 @@
 import express from "express";
+import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
+import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "http";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -127,37 +129,56 @@ db.exec(`
     amount REAL,
     message TEXT,
     date TEXT,
-    is_anonymous INTEGER DEFAULT 0,
     FOREIGN KEY(branch_id) REFERENCES branches(id)
   );
 
-  CREATE TABLE IF NOT EXISTS audit_logs (
+  CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    action TEXT,
-    details TEXT,
-    date TEXT,
+    user_name TEXT,
+    user_photo TEXT,
+    message TEXT,
+    image TEXT,
+    document TEXT,
+    document_name TEXT,
+    timestamp TEXT,
+    reactions TEXT DEFAULT '{}',
+    read_by TEXT DEFAULT '[]',
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
 
-  CREATE TABLE IF NOT EXISTS impact_stories (
+  CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_id INTEGER,
     title TEXT,
-    story TEXT,
-    beneficiary_name TEXT,
-    image TEXT,
+    description TEXT,
     date TEXT,
-    is_approved INTEGER DEFAULT 0,
+    time TEXT,
+    location TEXT,
+    category TEXT,
+    created_at TEXT,
     FOREIGN KEY(branch_id) REFERENCES branches(id)
   );
 
-  CREATE TABLE IF NOT EXISTS password_resets (
+  CREATE TABLE IF NOT EXISTS event_rsvps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT,
-    reset_token TEXT,
-    expires_at TEXT,
-    is_used INTEGER DEFAULT 0
+    event_id INTEGER,
+    user_id INTEGER,
+    timestamp TEXT,
+    FOREIGN KEY(event_id) REFERENCES events(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    title TEXT,
+    message TEXT,
+    type TEXT,
+    related_id INTEGER,
+    read INTEGER DEFAULT 0,
+    timestamp TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
   );
 `);
 
@@ -166,6 +187,16 @@ ensureColumn('users', 'phone', 'TEXT');
 ensureColumn('users', 'bio', 'TEXT');
 ensureColumn('users', 'photo', 'TEXT');
 ensureColumn('users', 'branch_id', 'INTEGER');
+ensureColumn('users', 'card_status', "TEXT DEFAULT 'none'");
+ensureColumn('users', 'card_id', 'TEXT');
+ensureColumn('users', 'card_issued_at', 'TEXT');
+ensureColumn('users', 'card_expires_at', 'TEXT');
+ensureColumn('users', 'card_full_name', 'TEXT');
+ensureColumn('users', 'card_phone', 'TEXT');
+ensureColumn('users', 'card_photo', 'TEXT');
+ensureColumn('users', 'card_rejection_reason', 'TEXT');
+ensureColumn('users', 'status', "TEXT DEFAULT 'active'");
+ensureColumn('users', 'location', 'TEXT');
 ensureColumn('branches', 'officer_name', 'TEXT');
 ensureColumn('branches', 'officer_bio', 'TEXT');
 ensureColumn('branches', 'officer_photo', 'TEXT');
@@ -173,11 +204,18 @@ ensureColumn('branches', 'officer_photos', 'TEXT'); // JSON array of base64 stri
 ensureColumn('activities', 'status', "TEXT DEFAULT 'active'");
 ensureColumn('resources', 'url', 'TEXT');
 ensureColumn('resources', 'date', 'TEXT');
+ensureColumn('chat_messages', 'image', 'TEXT');
+ensureColumn('chat_messages', 'document', 'TEXT');
+ensureColumn('chat_messages', 'document_name', 'TEXT');
+ensureColumn('chat_messages', 'user_photo', 'TEXT');
+ensureColumn('chat_messages', 'reactions', "TEXT DEFAULT '{}'");
+ensureColumn('chat_messages', 'read_by', "TEXT DEFAULT '[]'");
+ensureColumn('chat_messages', 'reply_to', 'TEXT'); // JSON string of the replied message
 
 // Seed master admin if empty
-const adminExists = db.prepare("SELECT * FROM users WHERE email = 'asmin@zion.com'").get();
+const adminExists = db.prepare("SELECT * FROM users WHERE email = 'asminadmin@gmail.com'").get();
 if (!adminExists) {
-  db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run('asmin@zion.com', 'asmin', 'Master Admin', 'master_admin');
+  db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run('asminadmin@gmail.com', 'asminadmin', 'Master Admin', 'master_admin');
 }
 
 // Seed branches if empty
@@ -197,13 +235,153 @@ if (branchCount.count === 0) {
 
 async function startServer() {
   const app = express();
+  const server = createServer(app);
+  const wss = new WebSocketServer({ server });
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
   const PORT = 3000;
 
+  // --- WebSocket Logic ---
+  const clients = new Set<WebSocket>();
+
+  wss.on("connection", (ws) => {
+    clients.add(ws);
+    
+    // Send message history
+    const history = db.prepare("SELECT * FROM chat_messages ORDER BY timestamp ASC LIMIT 100").all();
+    ws.send(JSON.stringify({ type: "history", messages: history }));
+
+    ws.on("message", (data) => {
+      try {
+        const payload = JSON.parse(data.toString());
+        
+        if (payload.type === "message") {
+          const { userId, userName, userPhoto, message, image, document, documentName, replyTo } = payload;
+          const timestamp = new Date().toISOString();
+          
+          const info = db.prepare("INSERT INTO chat_messages (user_id, user_name, user_photo, message, image, document, document_name, timestamp, reactions, read_by, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .run(userId, userName, userPhoto || null, message, image || null, document || null, documentName || null, timestamp, '{}', JSON.stringify([userId]), replyTo ? JSON.stringify(replyTo) : null);
+          
+          const newMessage = { 
+            id: info.lastInsertRowid, 
+            user_id: userId, 
+            user_name: userName, 
+            user_photo: userPhoto,
+            message, 
+            image, 
+            document,
+            document_name: documentName,
+            timestamp,
+            reactions: {},
+            read_by: [userId],
+            reply_to: replyTo
+          };
+          
+          const broadcastData = JSON.stringify({ type: "message", message: newMessage });
+          clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(broadcastData);
+            }
+          });
+        } else if (payload.type === "delete") {
+          const { messageId, userId } = payload;
+          const msg = db.prepare("SELECT user_id FROM chat_messages WHERE id = ?").get(messageId) as any;
+          if (msg && msg.user_id === userId) {
+            db.prepare("DELETE FROM chat_messages WHERE id = ?").run(messageId);
+            const broadcastData = JSON.stringify({ type: "delete_update", messageId });
+            clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(broadcastData);
+              }
+            });
+          }
+        } else if (payload.type === "edit") {
+          const { messageId, userId, newMessage } = payload;
+          const msg = db.prepare("SELECT user_id FROM chat_messages WHERE id = ?").get(messageId) as any;
+          if (msg && msg.user_id === userId) {
+            db.prepare("UPDATE chat_messages SET message = ? WHERE id = ?").run(newMessage, messageId);
+            const broadcastData = JSON.stringify({ type: "edit_update", messageId, newMessage });
+            clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(broadcastData);
+              }
+            });
+          }
+        } else if (payload.type === "typing") {
+          const { userId, userName, isTyping } = payload;
+          const broadcastData = JSON.stringify({ type: "typing", userId, userName, isTyping });
+          clients.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+              client.send(broadcastData);
+            }
+          });
+        } else if (payload.type === "reaction") {
+          const { messageId, userId, emoji } = payload;
+          const msg = db.prepare("SELECT reactions FROM chat_messages WHERE id = ?").get(messageId) as any;
+          if (msg) {
+            const reactions = JSON.parse(msg.reactions);
+            if (!reactions[emoji]) reactions[emoji] = [];
+            
+            const index = reactions[emoji].indexOf(userId);
+            if (index > -1) {
+              reactions[emoji].splice(index, 1);
+              if (reactions[emoji].length === 0) delete reactions[emoji];
+            } else {
+              reactions[emoji].push(userId);
+            }
+            
+            db.prepare("UPDATE chat_messages SET reactions = ? WHERE id = ?").run(JSON.stringify(reactions), messageId);
+            
+            const broadcastData = JSON.stringify({ type: "reaction_update", messageId, reactions });
+            clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(broadcastData);
+              }
+            });
+          }
+        } else if (payload.type === "read") {
+          const { messageId, userId } = payload;
+          const msg = db.prepare("SELECT read_by FROM chat_messages WHERE id = ?").get(messageId) as any;
+          if (msg) {
+            const readBy = JSON.parse(msg.read_by);
+            if (!readBy.includes(userId)) {
+              readBy.push(userId);
+              db.prepare("UPDATE chat_messages SET read_by = ? WHERE id = ?").run(JSON.stringify(readBy), messageId);
+              
+              const broadcastData = JSON.stringify({ type: "read_update", messageId, readBy });
+              clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                  client.send(broadcastData);
+                }
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error("WS Message Error:", e);
+      }
+    });
+
+    ws.on("close", () => {
+      clients.delete(ws);
+    });
+  });
+
   // --- API Routes ---
 
   // Auth (Simplified for demo)
+  app.post("/api/auth/register", (req, res) => {
+    const { email, password, name } = req.body;
+    try {
+      const info = db.prepare("INSERT INTO users (email, password, name) VALUES (?, ?, ?)").run(email, password, name);
+      db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(info.lastInsertRowid);
+      res.json({ success: true, userId: info.lastInsertRowid });
+    } catch (e) {
+      res.status(400).json({ error: "Email already exists" });
+    }
+  });
+
   app.post("/api/auth/login", (req, res) => {
     const { email, password } = req.body;
     const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password) as any;
@@ -286,7 +464,43 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  app.post("/api/admin/message", (req, res) => {
+    const { userId, message } = req.body;
+    db.prepare("INSERT INTO notifications (user_id, title, message, type, timestamp) VALUES (?, ?, ?, ?, ?)")
+      .run(userId, "Admin Message", message, "admin_message", new Date().toISOString());
+    res.json({ success: true });
+  });
+
   // Master Admin Dashboard
+  // Master Admin
+  app.get("/api/admin/master/users", (req, res) => {
+    const users = db.prepare("SELECT id, name, email, role, branch_id FROM users WHERE role = 'user'").all();
+    res.json(users);
+  });
+
+  app.get("/api/admin/master/analytics", (req, res) => {
+    const donations = db.prepare("SELECT amount, date FROM donations").all();
+    const transactions = db.prepare("SELECT amount, date, type FROM transactions").all();
+    const users = db.prepare("SELECT count(*) as count, strftime('%Y-%m', 'now') as month FROM users").get();
+    res.json({ donations, transactions, users });
+  });
+
+  app.get("/api/admin/regional/analytics/:branch_id", (req, res) => {
+    const branchId = req.params.branch_id;
+    const transactions = db.prepare(`
+      SELECT t.* FROM transactions t
+      JOIN users u ON t.user_id = u.id
+      WHERE u.branch_id = ?
+    `).all(branchId);
+    const applications = db.prepare("SELECT status, count(*) as count FROM donation_applications WHERE branch_id = ? GROUP BY status").all(branchId);
+    res.json({ transactions, applications });
+  });
+
+  app.get("/api/transactions/:user_id", (req, res) => {
+    const transactions = db.prepare("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC").all(req.params.user_id);
+    res.json(transactions);
+  });
+
   app.get("/api/admin/master/all-activities", (req, res) => {
     const donations = db.prepare("SELECT * FROM donations").all();
     const transactions = db.prepare("SELECT * FROM transactions").all();
@@ -383,27 +597,13 @@ async function startServer() {
   // Account & Savings
   app.get("/api/account/:userId", (req, res) => {
     const account = db.prepare("SELECT * FROM accounts WHERE user_id = ?").get(req.params.userId);
-    res.json(account);
+    res.json(account || null);
   });
 
   app.post("/api/account/deposit", (req, res) => {
     const { userId, amount } = req.body;
-    
-    // Server-side validation
-    const errors = validateInput({ amount }, {
-      amount: (v) => typeof v === 'number' && v > 0
-    });
-    
-    if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join(', ') });
-    }
-    
     db.prepare("UPDATE accounts SET balance = balance + ? WHERE user_id = ?").run(amount, userId);
     db.prepare("INSERT INTO transactions (user_id, type, amount, date) VALUES (?, 'deposit', ?, ?)").run(userId, amount, new Date().toISOString());
-    
-    // Add to audit log
-    db.prepare("INSERT INTO audit_logs (user_id, action, details, date) VALUES (?, ?, ?, ?)").run(userId, 'deposit', `Deposited ${amount}`, new Date().toISOString());
-    
     res.json({ success: true });
   });
 
@@ -424,29 +624,16 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Withdrawal from savings
-  app.post("/api/account/withdraw", (req, res) => {
-    const { userId, amount } = req.body;
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Invalid amount" });
-    }
-    const account = db.prepare("SELECT balance FROM accounts WHERE user_id = ?").get(userId) as any;
-    if (!account || account.balance < amount) {
-      return res.status(400).json({ error: "Insufficient balance" });
-    }
-    db.prepare("UPDATE accounts SET balance = balance - ? WHERE user_id = ?").run(amount, userId);
-    db.prepare("INSERT INTO transactions (user_id, type, amount, date) VALUES (?, 'withdrawal', ?, ?)").run(userId, amount, new Date().toISOString());
-    
-    // Add to audit log
-    db.prepare("INSERT INTO audit_logs (user_id, action, details, date) VALUES (?, ?, ?, ?)").run(userId, 'withdrawal', `Withdrew ${amount}`, new Date().toISOString());
-    
-    res.json({ success: true });
-  });
-
   // Donations
   app.get("/api/donations", (req, res) => {
     const donations = db.prepare("SELECT * FROM donations ORDER BY date DESC LIMIT 10").all();
     res.json(donations);
+  });
+
+  app.post("/api/donations", (req, res) => {
+    const { donorName, amount, message } = req.body;
+    db.prepare("INSERT INTO donations (donor_name, amount, date, message) VALUES (?, ?, ?, ?)").run(donorName, amount, new Date().toISOString(), message);
+    res.json({ success: true });
   });
 
   // Branches
@@ -489,9 +676,9 @@ async function startServer() {
   });
 
   app.post("/api/branches/:id/donate", (req, res) => {
-    const { donorName, amount, message, isAnonymous } = req.body;
-    db.prepare("INSERT INTO regional_donations (branch_id, donor_name, amount, message, date, is_anonymous) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(req.params.id, donorName, amount, message, new Date().toISOString(), isAnonymous ? 1 : 0);
+    const { donorName, amount, message } = req.body;
+    db.prepare("INSERT INTO regional_donations (branch_id, donor_name, amount, message, date) VALUES (?, ?, ?, ?, ?)")
+      .run(req.params.id, donorName, amount, message, new Date().toISOString());
     res.json({ success: true });
   });
 
@@ -502,212 +689,146 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Password Reset
-  app.post("/api/auth/forgot-password", (req, res) => {
-    const { email } = req.body;
-    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
-    if (!user) {
-      return res.status(404).json({ error: "Email not found" });
-    }
-    const resetToken = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    const expiresAt = new Date(Date.now() + 3600000).toISOString(); // 1 hour
-    db.prepare("INSERT INTO password_resets (email, reset_token, expires_at) VALUES (?, ?, ?)")
-      .run(email, resetToken, expiresAt);
-    // In production, send email with reset link
-    res.json({ success: true, message: "Password reset link sent to email", token: resetToken });
-  });
-
-  app.post("/api/auth/reset-password", (req, res) => {
-    const { token, newPassword } = req.body;
-    const reset = db.prepare("SELECT * FROM password_resets WHERE reset_token = ? AND is_used = 0").get(token) as any;
-    if (!reset) {
-      return res.status(400).json({ error: "Invalid or used token" });
-    }
-    if (new Date(reset.expires_at) < new Date()) {
-      return res.status(400).json({ error: "Token expired" });
-    }
-    db.prepare("UPDATE users SET password = ? WHERE email = ?").run(newPassword, reset.email);
-    db.prepare("UPDATE password_resets SET is_used = 1 WHERE id = ?").run(reset.id);
-    res.json({ success: true, message: "Password reset successful" });
-  });
-
-  // Search
-  app.get("/api/search", (req, res) => {
-    const { q } = req.query;
-    if (!q || typeof q !== 'string') {
-      return res.status(400).json({ error: "Search query required" });
-    }
-    const searchTerm = `%${q}%`;
-    const branches = db.prepare("SELECT id, region, location FROM branches WHERE region LIKE ? OR location LIKE ?").all(searchTerm, searchTerm);
-    const users = db.prepare("SELECT id, name, email, role FROM users WHERE name LIKE ? OR email LIKE ?").all(searchTerm, searchTerm);
-    const donations = db.prepare("SELECT * FROM donations WHERE donor_name LIKE ? OR message LIKE ? ORDER BY date DESC LIMIT 10").all(searchTerm, searchTerm);
-    res.json({ branches, users, donations });
-  });
-
-  // Analytics for Master Admin
-  app.get("/api/admin/master/analytics", (req, res) => {
-    const totalDonations = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM donations").get() as any;
-    const totalRegionalDonations = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM regional_donations").get() as any;
-    const totalUsers = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'user'").get() as any;
-    const totalOfficers = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'regional_officer'").get() as any;
-    const totalBranches = db.prepare("SELECT COUNT(*) as count FROM branches").get() as any;
-    const pendingApplications = db.prepare("SELECT COUNT(*) as count FROM donation_applications WHERE status = 'pending'").get() as any;
-    const approvedApplications = db.prepare("SELECT COUNT(*) as count FROM donation_applications WHERE status = 'replied'").get() as any;
-    const totalSavings = db.prepare("SELECT COALESCE(SUM(balance), 0) as total FROM accounts").get() as any;
-    
-    // Monthly donations for the last 6 months
-    const monthlyDonations = db.prepare(`
-      SELECT strftime('%Y-%m', date) as month, SUM(amount) as total 
-      FROM donations 
-      WHERE date >= date('now', '-6 months') 
-      GROUP BY month ORDER BY month
+  // Events & Notifications
+  app.get("/api/events", (req, res) => {
+    const events = db.prepare(`
+      SELECT e.*, (b.region || ' - ' || b.location) as branch_name, 
+      (SELECT COUNT(*) FROM event_rsvps WHERE event_id = e.id) as rsvp_count
+      FROM events e
+      JOIN branches b ON e.branch_id = b.id
+      ORDER BY e.date ASC
     `).all();
+    res.json(events);
+  });
+
+  app.post("/api/events", (req, res) => {
+    const { branchId, title, description, date, time, location, category } = req.body;
+    const info = db.prepare(`
+      INSERT INTO events (branch_id, title, description, date, time, location, category, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(branchId, title, description, date, time, location, category, new Date().toISOString());
     
-    res.json({
-      totalDonations: totalDonations.total,
-      totalRegionalDonations: totalRegionalDonations.total,
-      totalUsers: totalUsers.count,
-      totalOfficers: totalOfficers.count,
-      totalBranches: totalBranches.count,
-      pendingApplications: pendingApplications.count,
-      approvedApplications: approvedApplications.count,
-      totalSavings: totalSavings.total,
-      monthlyDonations
+    // Notify users in this branch
+    const users = db.prepare("SELECT id FROM users WHERE branch_id = ?").all(branchId) as any[];
+    const stmt = db.prepare("INSERT INTO notifications (user_id, title, message, type, related_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)");
+    users.forEach(u => {
+      stmt.run(u.id, "New Event", `A new event "${title}" has been posted in your branch.`, "event", info.lastInsertRowid, new Date().toISOString());
     });
+
+    res.json({ success: true, eventId: info.lastInsertRowid });
   });
 
-  // Impact Stories
-  app.get("/api/impact-stories", (req, res) => {
-    const stories = db.prepare("SELECT * FROM impact_stories WHERE is_approved = 1 ORDER BY date DESC").all();
-    res.json(stories);
+  app.get("/api/events/:id/rsvps", (req, res) => {
+    const rsvps = db.prepare("SELECT user_id FROM event_rsvps WHERE event_id = ?").all(req.params.id);
+    res.json(rsvps.map((r: any) => r.user_id));
   });
 
-  app.get("/api/admin/master/impact-stories", (req, res) => {
-    const stories = db.prepare("SELECT * FROM impact_stories ORDER BY date DESC").all();
-    res.json(stories);
+  app.post("/api/events/:id/rsvp", (req, res) => {
+    const { userId } = req.body;
+    const existing = db.prepare("SELECT id FROM event_rsvps WHERE event_id = ? AND user_id = ?").get(req.params.id, userId);
+    if (existing) {
+      db.prepare("DELETE FROM event_rsvps WHERE id = ?").run(existing.id);
+      res.json({ success: true, rsvp: false });
+    } else {
+      db.prepare("INSERT INTO event_rsvps (event_id, user_id, timestamp) VALUES (?, ?, ?)")
+        .run(req.params.id, userId, new Date().toISOString());
+      res.json({ success: true, rsvp: true });
+    }
   });
 
-  app.post("/api/admin/master/impact-stories", (req, res) => {
-    const { branchId, title, story, beneficiaryName, image } = req.body;
-    db.prepare("INSERT INTO impact_stories (branch_id, title, story, beneficiary_name, image, date, is_approved) VALUES (?, ?, ?, ?, ?, ?, 1)")
-      .run(branchId, title, story, beneficiaryName, image, new Date().toISOString());
+  app.get("/api/notifications/:userId", (req, res) => {
+    const notifications = db.prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY timestamp DESC LIMIT 50").all(req.params.userId);
+    res.json(notifications);
+  });
+
+  app.post("/api/notifications/:id/read", (req, res) => {
+    db.prepare("UPDATE notifications SET read = 1 WHERE id = ?").run(req.params.id);
     res.json({ success: true });
   });
 
-  app.put("/api/admin/master/impact-stories/:id", (req, res) => {
-    const { title, story, beneficiaryName, image, isApproved } = req.body;
-    db.prepare("UPDATE impact_stories SET title = ?, story = ?, beneficiary_name = ?, image = ?, is_approved = ? WHERE id = ?")
-      .run(title, story, beneficiaryName, image, isApproved ? 1 : 0, req.params.id);
+  // Membership Card Management
+  app.post("/api/card/request", (req, res) => {
+    const { userId, fullName, phone, photo } = req.body;
+    db.prepare(`
+      UPDATE users 
+      SET card_status = 'pending', 
+          card_full_name = ?, 
+          card_phone = ?, 
+          card_photo = ?,
+          card_rejection_reason = NULL
+      WHERE id = ?
+    `).run(fullName, phone, photo, userId);
     res.json({ success: true });
   });
 
-  app.delete("/api/admin/master/impact-stories/:id", (req, res) => {
-    db.prepare("DELETE FROM impact_stories WHERE id = ?").run(req.params.id);
+  app.get("/api/admin/pending-cards", (req, res) => {
+    const pending = db.prepare(`
+      SELECT id, name, email, photo, role, card_full_name, card_phone, card_photo 
+      FROM users 
+      WHERE card_status = 'pending'
+    `).all();
+    res.json(pending);
+  });
+
+  app.post("/api/admin/approve-card/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const cardId = Array.from({ length: 16 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 36)]).join('');
+    const issuedAt = new Date().toISOString();
+    const expiresAt = new Date(new Date().setFullYear(new Date().getFullYear() + 2)).toISOString();
+    
+    db.prepare("UPDATE users SET card_status = 'approved', card_id = ?, card_issued_at = ?, card_expires_at = ? WHERE id = ?")
+      .run(cardId, issuedAt, expiresAt, userId);
+    
+    // Notify user
+    db.prepare("INSERT INTO notifications (user_id, title, message, type, timestamp) VALUES (?, ?, ?, ?, ?)")
+      .run(userId, "Membership Card Approved", "Your official membership card has been approved and issued.", "card", new Date().toISOString());
+      
+    res.json({ success: true, cardId, issuedAt, expiresAt });
+  });
+
+  app.post("/api/admin/reject-card/:userId", (req, res) => {
+    const userId = req.params.userId;
+    const { reason } = req.body;
+    
+    db.prepare("UPDATE users SET card_status = 'rejected', card_rejection_reason = ? WHERE id = ?")
+      .run(reason, userId);
+    
+    // Notify user
+    db.prepare("INSERT INTO notifications (user_id, title, message, type, timestamp) VALUES (?, ?, ?, ?, ?)")
+      .run(userId, "Membership Card Rejected", `Your membership card request was rejected. Reason: ${reason}. Please update your details and try again.`, "card", new Date().toISOString());
+      
     res.json({ success: true });
   });
 
-  // Transaction History
-  app.get("/api/transactions/:userId", (req, res) => {
-    const transactions = db.prepare("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC").all(req.params.userId);
-    res.json(transactions);
-  });
-
-  // Generate Receipt
-  app.get("/api/receipt/:transactionId", (req, res) => {
-    const transaction = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.transactionId) as any;
-    if (!transaction) {
-      return res.status(404).json({ error: "Transaction not found" });
-    }
-    const user = db.prepare("SELECT name, email FROM users WHERE id = ?").get(transaction.user_id) as any;
-    
-    const receipt = {
-      receiptId: `RCP-${transaction.id}-${Date.now()}`,
-      transactionId: transaction.id,
-      userName: user?.name || 'N/A',
-      userEmail: user?.email || 'N/A',
-      type: transaction.type,
-      amount: transaction.amount,
-      date: transaction.date,
-      organization: "Arise and Shine Ministries International",
-      message: "Thank you for your support!"
-    };
-    res.json(receipt);
-  });
-
-  // Regional Requests - Get all for branch
-  app.get("/api/branches/:id/requests", (req, res) => {
-    const requests = db.prepare("SELECT * FROM regional_requests WHERE branch_id = ? ORDER BY date DESC").all(req.params.id);
-    res.json(requests);
-  });
-
-  // Regional Requests - Update status
-  app.put("/api/admin/regional/requests/:id", (req, res) => {
-    const { status } = req.body;
-    db.prepare("UPDATE regional_requests SET status = ? WHERE id = ?").run(status, req.params.id);
+  // Admin User Management
+  app.post("/api/admin/users/:id/warn", (req, res) => {
+    const { id } = req.params;
+    const { message } = req.body;
+    db.prepare("INSERT INTO notifications (user_id, title, message, type, timestamp) VALUES (?, ?, ?, ?, ?)").run(
+      id, "Warning from Admin", message, "warning", new Date().toISOString()
+    );
     res.json({ success: true });
   });
 
-  // Regional Donations - Get all for branch (public)
-  app.get("/api/branches/:id/donations", (req, res) => {
-    const donations = db.prepare("SELECT id, donor_name, amount, message, date, is_anonymous FROM regional_donations WHERE branch_id = ? ORDER BY date DESC").all(req.params.id);
-    res.json(donations);
+  app.post("/api/admin/users/:id/suspend", (req, res) => {
+    const { id } = req.params;
+    db.prepare("UPDATE users SET status = 'suspended' WHERE id = ?").run(id);
+    db.prepare("INSERT INTO notifications (user_id, title, message, type, timestamp) VALUES (?, ?, ?, ?, ?)").run(
+      id, "Account Suspended", "Your account has been suspended by the administrator.", "alert", new Date().toISOString()
+    );
+    res.json({ success: true });
   });
 
-  // Audit Logs
-  app.get("/api/admin/master/audit-logs", (req, res) => {
-    const logs = db.prepare("SELECT al.*, u.name as user_name FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id ORDER BY al.date DESC LIMIT 100").all();
-    res.json(logs);
+  app.post("/api/admin/users/:id/ban", (req, res) => {
+    const { id } = req.params;
+    db.prepare("UPDATE users SET status = 'banned' WHERE id = ?").run(id);
+    res.json({ success: true });
   });
 
-  // Input Validation Helper
-  const validateInput = (data: any, rules: Record<string, (val: any) => boolean>) => {
-    const errors: string[] = [];
-    for (const [field, validator] of Object.entries(rules)) {
-      if (!validator(data[field])) {
-        errors.push(`Invalid ${field}`);
-      }
-    }
-    return errors;
-  };
-
-  // Apply validation to registration
-  app.post("/api/auth/register", (req, res) => {
-    const { email, password, name } = req.body;
-    
-    // Server-side validation
-    const errors = validateInput({ email, password, name }, {
-      email: (v) => typeof v === 'string' && v.includes('@'),
-      password: (v) => typeof v === 'string' && v.length >= 4,
-      name: (v) => typeof v === 'string' && v.length >= 2
-    });
-    
-    if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join(', ') });
-    }
-    
-    try {
-      const info = db.prepare("INSERT INTO users (email, password, name) VALUES (?, ?, ?)").run(email, password, name);
-      db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(info.lastInsertRowid);
-      res.json({ success: true, userId: info.lastInsertRowid });
-    } catch (e) {
-      res.status(400).json({ error: "Email already exists" });
-    }
-  });
-
-  // Apply validation to donations
-  app.post("/api/donations", (req, res) => {
-    const { donorName, amount, message, isAnonymous } = req.body;
-    
-    const errors = validateInput({ amount }, {
-      amount: (v) => typeof v === 'number' && v > 0
-    });
-    
-    if (errors.length > 0) {
-      return res.status(400).json({ error: errors.join(', ') });
-    }
-    
-    const name = isAnonymous ? 'Anonymous' : donorName;
-    db.prepare("INSERT INTO donations (donor_name, amount, date, message) VALUES (?, ?, ?, ?)").run(name, amount, new Date().toISOString(), message);
+  app.delete("/api/admin/users/:id", (req, res) => {
+    const { id } = req.params;
+    db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    db.prepare("DELETE FROM accounts WHERE user_id = ?").run(id);
     res.json({ success: true });
   });
 
@@ -726,13 +847,21 @@ async function startServer() {
     }
   });
 
-  // Serve static files from dist folder (production)
-  app.use(express.static(path.join(__dirname, "dist")));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "dist", "index.html"));
-  });
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }

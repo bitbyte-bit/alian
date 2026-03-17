@@ -7,6 +7,16 @@ export interface User {
   photo?: string;
   role: 'user' | 'regional_officer' | 'master_admin';
   branch_id?: number;
+  card_status?: 'none' | 'pending' | 'approved' | 'rejected';
+  card_id?: string;
+  card_issued_at?: string;
+  card_expires_at?: string;
+  card_full_name?: string;
+  card_phone?: string;
+  card_photo?: string;
+  card_rejection_reason?: string;
+  status: 'active' | 'suspended' | 'banned';
+  location?: string;
 }
 
 export interface DonationApplication {
@@ -80,77 +90,32 @@ export interface Resource {
 export interface Transaction {
   id: number;
   user_id: number;
-  type: 'deposit' | 'asmin_collection' | 'withdrawal';
+  type: 'deposit' | 'asmin_collection';
   amount: number;
   date: string;
 }
 
-export interface ImpactStory {
+export interface Event {
   id: number;
   branch_id: number;
+  branch_name: string;
   title: string;
-  story: string;
-  beneficiary_name: string;
-  image: string;
+  description: string;
   date: string;
-  is_approved: number;
+  time: string;
+  location: string;
+  category: string;
+  rsvp_count: number;
+  created_at: string;
 }
 
-export interface RegionalRequest {
-  id: number;
-  branch_id: number;
-  requester_name: string;
-  contact: string;
-  need_description: string;
-  status: string;
-  date: string;
-}
-
-export interface RegionalDonation {
-  id: number;
-  branch_id: number;
-  donor_name: string;
-  amount: number;
-  message: string;
-  date: string;
-  is_anonymous: number;
-}
-
-export interface AuditLog {
+export interface Notification {
   id: number;
   user_id: number;
-  action: string;
-  details: string;
-  date: string;
-  user_name?: string;
-}
-
-export interface Analytics {
-  totalDonations: number;
-  totalRegionalDonations: number;
-  totalUsers: number;
-  totalOfficers: number;
-  totalBranches: number;
-  pendingApplications: number;
-  approvedApplications: number;
-  totalSavings: number;
-  monthlyDonations: { month: string; total: number }[];
-}
-
-export interface Receipt {
-  receiptId: string;
-  transactionId: number;
-  userName: string;
-  userEmail: string;
-  type: string;
-  amount: number;
-  date: string;
-  organization: string;
+  title: string;
   message: string;
-}
-
-export interface SearchResults {
-  branches: Branch[];
-  users: User[];
-  donations: Donation[];
+  type: string;
+  related_id?: number;
+  read: number;
+  timestamp: string;
 }
