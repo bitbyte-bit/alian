@@ -31,7 +31,7 @@ const db = new Database("asmin.db");
 // Initialize Database
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     email TEXT UNIQUE,
     password TEXT,
     name TEXT,
@@ -43,6 +43,51 @@ db.exec(`
   -- but we can try to add them and ignore the error if they already exist.
   -- Better way: check PRAGMA table_info(users)
 `);
+// Migration: Convert users.id from INTEGER to TEXT if needed
+try {
+    const userColumns = db.prepare('PRAGMA table_info(users)').all();
+    const idColumn = userColumns.find(col => col.name === 'id');
+    if (idColumn && idColumn.type === 'INTEGER') {
+        // Check if we need to migrate - if there's data with integer IDs
+        const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();
+        if (userCount.count > 0) {
+            // Generate UUIDs for existing users
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS users_new (
+                    id TEXT PRIMARY KEY,
+                    email TEXT UNIQUE,
+                    password TEXT,
+                    name TEXT,
+                    role TEXT DEFAULT 'user'
+                );
+                INSERT INTO users_new (id, email, password, name, role) 
+                SELECT 
+                    CASE 
+                        WHEN role = 'master_admin' THEN '00000000-0000-0000-0000-000000000001'
+                        ELSE lower(hex(randomblob(4))) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)),1,3) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)),1,3) || hex(randomblob(4))
+                    END as id,
+                    email, password, name, role 
+                FROM users;
+                DROP TABLE users;
+                ALTER TABLE users_new RENAME TO users;
+            `);
+        } else {
+            // Just drop and recreate if empty
+            db.exec('DROP TABLE users');
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT UNIQUE,
+                    password TEXT,
+                    name TEXT,
+                    role TEXT DEFAULT 'user'
+                );
+            `);
+        }
+    }
+} catch (e) {
+    // Ignore migration errors - table may not exist yet
+}
 // Migration helper
 const ensureColumn = (table, column, type) => {
     const info = db.prepare(`PRAGMA table_info(${table})`).all();
