@@ -326,10 +326,38 @@ async function startServer() {
             try {
                 const payload = JSON.parse(data.toString());
                 if (payload.type === "message") {
-                    const { userId, userName, userPhoto, message, image, document, documentName, replyTo } = payload;
+                    const { userId, userName, userPhoto, userPhone, message, image, document, documentName, video, audio, poll, privateTo, replyTo } = payload;
                     const timestamp = new Date().toISOString();
-                    const info = db.prepare("INSERT INTO chat_messages (user_id, user_name, user_photo, message, image, document, document_name, timestamp, reactions, read_by, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                        .run(userId, userName, userPhoto || null, message, image || null, document || null, documentName || null, timestamp, '{}', JSON.stringify([userId]), replyTo ? JSON.stringify(replyTo) : null);
+                    const info = db.prepare("INSERT INTO chat_messages (user_id, user_name, user_photo, user_phone, message, image, document, document_name, video, audio, poll, private_to, timestamp, reactions, read_by, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .run(userId, userName, userPhoto || null, userPhone || null, message, image || null, document || null, documentName || null, video || null, audio || null, poll ? JSON.stringify(poll) : null, privateTo || null, timestamp, '{}', JSON.stringify([userId]), replyTo ? JSON.stringify(replyTo) : null);
+                    
+                    const newMessage = {
+                        id: info.lastInsertRowid,
+                        user_id: userId,
+                        user_name: userName,
+                        user_photo: userPhoto,
+                        user_phone: userPhone,
+                        message,
+                        image,
+                        document,
+                        document_name: documentName,
+                        video,
+                        audio,
+                        poll: poll ? { ...poll, votes: {} } : null,
+                        private_to: privateTo,
+                        timestamp,
+                        reactions: {},
+                        read_by: [userId],
+                        reply_to: replyTo
+                    };
+                    
+                    // Send to relevant clients (all for community, only specific user for private)
+                    const broadcastData = JSON.stringify({ type: "message", message: newMessage });
+                    clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(broadcastData);
+                        }
+                    });
                     
                     // Send push notifications to all users except the sender
                     const allUsers = db.prepare('SELECT DISTINCT user_id FROM chat_messages').all();
@@ -345,26 +373,33 @@ async function startServer() {
                             }
                         }
                     }
-                    const newMessage = {
-                        id: info.lastInsertRowid,
-                        user_id: userId,
-                        user_name: userName,
-                        user_photo: userPhoto,
-                        message,
-                        image,
-                        document,
-                        document_name: documentName,
-                        timestamp,
-                        reactions: {},
-                        read_by: [userId],
-                        reply_to: replyTo
-                    };
-                    const broadcastData = JSON.stringify({ type: "message", message: newMessage });
-                    clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(broadcastData);
-                        }
-                    });
+                }
+                else if (payload.type === "private_history") {
+                    const { userId, otherUserId } = payload;
+                    // Get private messages between these two users
+                    const history = db.prepare(`
+                        SELECT * FROM chat_messages 
+                        WHERE (user_id = ? AND private_to = ?) 
+                           OR (user_id = ? AND private_to = ?)
+                        ORDER BY timestamp ASC LIMIT 100
+                    `).all(userId, otherUserId, otherUserId, userId);
+                    ws.send(JSON.stringify({ type: "private_history", messages: history }));
+                }
+                else if (payload.type === "poll_vote") {
+                    const { messageId, userId, optionIndex } = payload;
+                    const msg = db.prepare("SELECT poll FROM chat_messages WHERE id = ?").get(messageId);
+                    if (msg && msg.poll) {
+                        const poll = JSON.parse(msg.poll);
+                        if (!poll.votes) poll.votes = {};
+                        poll.votes[userId] = optionIndex;
+                        db.prepare("UPDATE chat_messages SET poll = ? WHERE id = ?").run(JSON.stringify(poll), messageId);
+                        const broadcastData = JSON.stringify({ type: "poll_update", messageId, poll });
+                        clients.forEach(client => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(broadcastData);
+                            }
+                        });
+                    }
                 }
                 else if (payload.type === "delete") {
                     const { messageId, userId, userName } = payload;
@@ -454,7 +489,7 @@ async function startServer() {
         });
     });
     // --- API Routes ---
-    // Auth (Simplified for demo)
+    // Auth
     app.post("/api/auth/register", async (req, res) => {
         const { email, password, name, phone } = req.body;
         
@@ -599,9 +634,28 @@ async function startServer() {
     // Profile Management
     app.post("/api/profile/update", async (req, res) => {
         const { userId, name, email, phone, bio, photo, currentPassword, newPassword } = req.body;
+        
+        if (!userId) {
+            return res.status(400).json({ error: "User ID is required" });
+        }
+        
         const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-        if (!await bcrypt.compare(currentPassword, user.password)) {
-            return res.status(401).json({ error: "Incorrect current password" });
+        
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+        
+        // Verify current password if attempting to change password or email
+        if (currentPassword && user.password) {
+            const isValidPassword = await bcrypt.compare(currentPassword, user.password);
+            if (!isValidPassword) {
+                return res.status(401).json({ error: "Incorrect current password" });
+            }
+        } else if (!user.password) {
+            // User has no password set, skip password verification
+        } else if (!currentPassword) {
+            // Password is required to update profile
+            return res.status(401).json({ error: "Current password is required to update profile" });
         }
         let passwordToSet = user.password;
         if (newPassword) {

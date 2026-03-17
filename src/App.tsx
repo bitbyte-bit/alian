@@ -71,7 +71,11 @@ import {
   Users,
   AlertTriangle,
   ShieldAlert,
-  Ban
+  Ban,
+  Video,
+  Mic,
+  BarChart2,
+  Vote
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -1224,6 +1228,30 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
     photo: user.card_photo || user.photo || '',
     location: user.location || ''
   });
+
+  // Fetch latest user data to get updated card status from admin approval
+  useEffect(() => {
+    const fetchLatestUser = async () => {
+      try {
+        const res = await fetch(`/api/user/${user.id}`);
+        if (res.ok) {
+          const latestUser = await res.json();
+          // Update the parent state with latest user data including card_status
+          onUpdate(latestUser as User);
+          // Update local card form data with latest user data
+          setCardFormData({
+            fullName: latestUser.card_full_name || user.name,
+            phone: latestUser.card_phone || user.phone || '',
+            photo: latestUser.card_photo || user.photo || '',
+            location: latestUser.location || ''
+          });
+        }
+      } catch (err) {
+        console.error('Failed to fetch latest user data:', err);
+      }
+    };
+    fetchLatestUser();
+  }, [user.id, onUpdate]);
 
   const handleCardPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -3376,6 +3404,14 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
 };
 
 const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onClose: () => void }) => {
+  // User Profile Modal state
+  const [selectedProfile, setSelectedProfile] = useState<any | null>(null);
+  const [showPollModal, setShowPollModal] = useState(false);
+  const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+
   // MessageContent component for parsing phone numbers and names
   const MessageContent = ({ text }: { text: string }) => {
     const [registeredUsers, setRegisteredUsers] = useState<Record<string, boolean>>({});
@@ -3443,7 +3479,16 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
   const docInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Search for users
+  // Fetch private chat history when selecting a private chat user
+  useEffect(() => {
+    if (privateChatUser && socket) {
+      socket.send(JSON.stringify({
+        type: 'private_history',
+        userId: user.id,
+        otherUserId: privateChatUser.id
+      }));
+    }
+  }, [privateChatUser, socket, user.id]);
   const handleSearch = async (query: string) => {
     setSearchQuery(query);
     if (query.length < 2) {
@@ -3483,9 +3528,25 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
             ws.send(JSON.stringify({ type: 'read', messageId: m.id, userId: user.id }));
           }
         });
+      } else if (data.type === 'private_history') {
+        const parsedMessages = data.messages.map((m: any) => ({
+          ...m,
+          reactions: typeof m.reactions === 'string' ? JSON.parse(m.reactions) : m.reactions,
+          read_by: typeof m.read_by === 'string' ? JSON.parse(m.read_by) : m.read_by,
+          reply_to: m.reply_to ? (typeof m.reply_to === 'string' ? JSON.parse(m.reply_to) : m.reply_to) : null
+        }));
+        setMessages(parsedMessages);
       } else if (data.type === 'message') {
-        setMessages(prev => [...prev, data.message]);
-        ws.send(JSON.stringify({ type: 'read', messageId: data.message.id, userId: user.id }));
+        // Filter messages based on whether we're in private or community chat
+        const isPrivateMessage = data.message.private_to !== null;
+        const isForCurrentPrivateChat = privateChatUser && 
+          (data.message.private_to === user.id || data.message.user_id === privateChatUser.id);
+        const isForCommunity = !data.message.private_to;
+        
+        if ((privateChatUser && isForCurrentPrivateChat) || (!privateChatUser && isForCommunity)) {
+          setMessages(prev => [...prev, data.message]);
+          ws.send(JSON.stringify({ type: 'read', messageId: data.message.id, userId: user.id }));
+        }
       } else if (data.type === 'typing') {
         setTypingUsers(prev => {
           const next = { ...prev };
@@ -3501,6 +3562,8 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, message: '', deleted_by: data.deletedBy } : m));
       } else if (data.type === 'edit_update') {
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, message: data.newMessage } : m));
+      } else if (data.type === 'poll_update') {
+        setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, poll: data.poll } : m));
       }
     };
 
@@ -3546,10 +3609,12 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
         userId: user.id,
         userName: user.name,
         userPhoto: user.photo || null,
+        userPhone: user.phone || null,
         message: image ? '[Image]' : (document ? `[Document: ${documentName}]` : input.trim()),
         image: image || null,
         document: document || null,
         documentName: documentName || null,
+        privateTo: privateChatUser ? privateChatUser.id : null,
         replyTo: replyingTo ? {
           id: replyingTo.id,
           userName: replyingTo.user_name,
@@ -3604,6 +3669,112 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
     }
   };
 
+  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      // Check file size (max 5MB)
+      const maxSize = 5 * 1024 * 1024; // 5MB
+      if (file.size > maxSize) {
+        alert('Video file size must be less than 5MB');
+        return;
+      }
+      if (!file.type.startsWith('video/')) {
+        alert('Please select a valid video file');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        socket?.send(JSON.stringify({
+          type: 'message',
+          userId: user.id,
+          userName: user.name,
+          userPhoto: user.photo || null,
+          userPhone: user.phone || null,
+          message: '[Video]',
+          video: reader.result as string,
+          privateTo: privateChatUser ? privateChatUser.id : null,
+          replyTo: replyingTo ? {
+            id: replyingTo.id,
+            userName: replyingTo.user_name,
+            message: replyingTo.message
+          } : null
+        }));
+        setReplyingTo(null);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (!file.type.startsWith('audio/')) {
+        alert('Please select a valid audio file');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        socket?.send(JSON.stringify({
+          type: 'message',
+          userId: user.id,
+          userName: user.name,
+          userPhoto: user.photo || null,
+          userPhone: user.phone || null,
+          message: '[Audio]',
+          audio: reader.result as string,
+          privateTo: privateChatUser ? privateChatUser.id : null,
+          replyTo: replyingTo ? {
+            id: replyingTo.id,
+            userName: replyingTo.user_name,
+            message: replyingTo.message
+          } : null
+        }));
+        setReplyingTo(null);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const sendPoll = () => {
+    if (!pollQuestion.trim() || pollOptions.filter(o => o.trim()).length < 2) {
+      alert('Please enter a question and at least 2 options');
+      return;
+    }
+    const pollData = {
+      question: pollQuestion.trim(),
+      options: pollOptions.filter(o => o.trim()),
+      votes: {}
+    };
+    socket?.send(JSON.stringify({
+      type: 'message',
+      userId: user.id,
+      userName: user.name,
+      userPhoto: user.photo || null,
+      userPhone: user.phone || null,
+      message: '[Poll]',
+      poll: pollData,
+      privateTo: privateChatUser ? privateChatUser.id : null,
+      replyTo: replyingTo ? {
+        id: replyingTo.id,
+        userName: replyingTo.user_name,
+        message: replyingTo.message
+      } : null
+    }));
+    setShowPollModal(false);
+    setPollQuestion('');
+    setPollOptions(['', '']);
+    setReplyingTo(null);
+  };
+
+  const votePoll = (messageId: number, optionIndex: number) => {
+    socket?.send(JSON.stringify({
+      type: 'poll_vote',
+      messageId,
+      userId: user.id,
+      optionIndex
+    }));
+  };
+
   const downloadFile = (url: string, filename: string) => {
     const link = document.createElement('a');
     link.href = url;
@@ -3636,9 +3807,22 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
             {privateChatUser ? privateChatUser.phone || privateChatUser.email : 'ASMIN Uganda'}
           </p>
         </div>
-        <button onClick={() => setShowSearch(!showSearch)} className="p-2 -mr-2 text-stone-400">
-          <Search className="w-6 h-6" />
-        </button>
+        {privateChatUser ? (
+          <button 
+            onClick={() => {
+              setPrivateChatUser(null);
+              // Fetch community chat history when going back to community
+              socket?.send(JSON.stringify({ type: 'history', userId: user.id }));
+            }} 
+            className="p-2 -mr-2 text-stone-400 hover:text-emerald-600"
+          >
+            <Users className="w-6 h-6" />
+          </button>
+        ) : (
+          <button onClick={() => setShowSearch(!showSearch)} className="p-2 -mr-2 text-stone-400">
+            <Search className="w-6 h-6" />
+          </button>
+        )}
       </div>
 
       {/* Search Results */}
@@ -3717,9 +3901,17 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                 {/* Profile Photo */}
                 <div className="flex-shrink-0 mt-1">
                   {msg.user_photo ? (
-                    <img src={msg.user_photo} className="w-8 h-8 rounded-full object-cover border border-stone-100" alt={msg.user_name} />
+                    <img 
+                      src={msg.user_photo} 
+                      className="w-8 h-8 rounded-full object-cover border border-stone-100 cursor-pointer hover:ring-2 hover:ring-emerald-500 transition-all" 
+                      alt={msg.user_name}
+                      onClick={() => setSelectedProfile({ id: msg.user_id, name: msg.user_name, photo: msg.user_photo, phone: msg.user_phone })}
+                    />
                   ) : (
-                    <div className="w-8 h-8 rounded-full bg-stone-100 flex items-center justify-center text-stone-400">
+                    <div 
+                      className="w-8 h-8 rounded-full bg-stone-100 flex items-center justify-center text-stone-400 cursor-pointer hover:ring-2 hover:ring-emerald-500 transition-all"
+                      onClick={() => setSelectedProfile({ id: msg.user_id, name: msg.user_name, photo: null, phone: msg.user_phone })}
+                    >
                       <UserIcon className="w-4 h-4" />
                     </div>
                   )}
@@ -3730,7 +3922,10 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                   isMe ? "items-end" : "items-start"
                 )}>
                   {!isMe && (
-                    <span className="text-[10px] font-bold text-stone-400 mb-1 ml-1 uppercase tracking-tighter">
+                    <span 
+                      className="text-[10px] font-bold text-stone-400 mb-1 ml-1 uppercase tracking-tighter cursor-pointer hover:text-emerald-600 transition-colors"
+                      onClick={() => setSelectedProfile({ id: msg.user_id, name: msg.user_name, photo: msg.user_photo, phone: msg.user_phone })}
+                    >
                       {msg.user_name}
                     </span>
                   )}
@@ -3817,6 +4012,115 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                           <Download className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                    </div>
+                  )}
+
+                  {msg.video && (
+                    <div className="relative group/media mb-2">
+                      <video 
+                        src={msg.video} 
+                        className="rounded-xl max-h-60 w-full object-cover cursor-pointer hover:opacity-90 transition-opacity" 
+                        controls
+                        preload="metadata"
+                      />
+                      <button 
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = msg.video;
+                          link.download = `video_${msg.id}.mp4`;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                        className="absolute top-2 right-2 p-1.5 bg-black/50 text-white rounded-full opacity-0 group-hover/media:opacity-100 transition-opacity"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {msg.audio && (
+                    <div className={cn(
+                      "flex items-center gap-3 p-3 rounded-xl mb-2 border",
+                      isMe ? "bg-emerald-700/30 border-emerald-500/30" : "bg-white border-stone-200"
+                    )}>
+                      <div className={cn(
+                        "w-10 h-10 rounded-lg flex items-center justify-center",
+                        isMe ? "bg-emerald-500/20" : "bg-stone-100"
+                      )}>
+                        <Mic className={cn("w-5 h-5", isMe ? "text-emerald-200" : "text-stone-500")} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <audio 
+                          src={msg.audio} 
+                          controls 
+                          className="w-full h-8"
+                          preload="none"
+                        />
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = msg.audio;
+                          link.download = `audio_${msg.id}.mp3`;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                        className={cn("p-1.5 rounded-full transition-colors", isMe ? "hover:bg-emerald-500/30 text-emerald-100" : "hover:bg-stone-100 text-stone-500")}
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {msg.poll && (
+                    <div className={cn(
+                      "p-3 rounded-xl mb-2 border",
+                      isMe ? "bg-emerald-700/30 border-emerald-500/30" : "bg-white border-stone-200"
+                    )}>
+                      <p className={cn("text-[13px] font-bold mb-3", isMe ? "text-white" : "text-stone-900")}>
+                        {msg.poll.question}
+                      </p>
+                      <div className="space-y-2">
+                        {msg.poll.options.map((option: string, idx: number) => {
+                          const votes = msg.poll.votes || {};
+                          const voteCount = Object.values(votes).filter((v: any) => v === idx).length;
+                          const totalVotes = Object.keys(votes).length;
+                          const percentage = totalVotes > 0 ? Math.round((voteCount / totalVotes) * 100) : 0;
+                          const hasVoted = votes[user.id] === idx;
+                          
+                          return (
+                            <button
+                              key={idx}
+                              onClick={() => votePoll(msg.id, idx)}
+                              disabled={!votes[user.id]}
+                              className={cn(
+                                "w-full p-2 rounded-lg text-left text-[12px] transition-all relative overflow-hidden",
+                                isMe 
+                                  ? (hasVoted ? "bg-emerald-500 text-white" : "bg-emerald-600/50 text-white hover:bg-emerald-500")
+                                  : (hasVoted ? "bg-emerald-100 text-emerald-800" : "bg-stone-100 text-stone-800 hover:bg-stone-200"),
+                                votes[user.id] ? "cursor-default" : "cursor-pointer"
+                              )}
+                            >
+                              <div 
+                                className={cn(
+                                  "absolute inset-y-0 left-0 rounded-lg transition-all",
+                                  isMe ? "bg-emerald-400" : "bg-stone-300"
+                                )}
+                                style={{ width: `${percentage}%` }}
+                              />
+                              <span className="relative z-10 flex items-center justify-between">
+                                <span>{option}</span>
+                                <span className="font-bold">{percentage}% ({voteCount})</span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className={cn("text-[9px] mt-2 opacity-60", isMe ? "text-emerald-100" : "text-stone-500")}>
+                        {Object.keys(msg.poll.votes || {}).length} vote{Object.keys(msg.poll.votes || {}).length !== 1 ? 's' : ''}
+                      </p>
                     </div>
                   )}
 
@@ -3952,6 +4256,20 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           accept=".pdf,.doc,.docx,.txt" 
           className="hidden" 
         />
+        <input 
+          type="file" 
+          ref={videoInputRef} 
+          onChange={handleVideoUpload} 
+          accept="video/*" 
+          className="hidden" 
+        />
+        <input 
+          type="file" 
+          ref={audioInputRef} 
+          onChange={handleAudioUpload} 
+          accept="audio/*" 
+          className="hidden" 
+        />
         <form onSubmit={sendMessage} className="flex items-end gap-2">
           <div className="flex items-center gap-1 mb-1">
             <button 
@@ -3967,6 +4285,30 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
               className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
             >
               <FileText className="w-5 h-5" />
+            </button>
+            <button 
+              type="button"
+              onClick={() => videoInputRef.current?.click()}
+              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
+              title="Video (max 5MB)"
+            >
+              <Video className="w-5 h-5" />
+            </button>
+            <button 
+              type="button"
+              onClick={() => audioInputRef.current?.click()}
+              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
+              title="Audio"
+            >
+              <Mic className="w-5 h-5" />
+            </button>
+            <button 
+              type="button"
+              onClick={() => setShowPollModal(true)}
+              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
+              title="Create Poll"
+            >
+              <Vote className="w-5 h-5" />
             </button>
           </div>
           <div className="flex-1 relative">
@@ -4054,6 +4396,152 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                 </div>
               )}
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* User Profile Modal */}
+      <AnimatePresence>
+        {selectedProfile && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] bg-black/50 flex items-center justify-center p-4"
+            onClick={() => setSelectedProfile(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-2xl p-6 w-full max-w-sm"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="text-center">
+                {selectedProfile.photo ? (
+                  <img src={selectedProfile.photo} alt={selectedProfile.name} className="w-24 h-24 rounded-full object-cover mx-auto mb-4 border-4 border-emerald-100" />
+                ) : (
+                  <div className="w-24 h-24 rounded-full bg-stone-100 flex items-center justify-center mx-auto mb-4">
+                    <UserIcon className="w-12 h-12 text-stone-400" />
+                  </div>
+                )}
+                <h3 className="text-xl font-bold text-stone-900">{selectedProfile.name}</h3>
+                {selectedProfile.phone && (
+                  <p className="text-sm text-stone-500 mt-1">{selectedProfile.phone}</p>
+                )}
+              </div>
+              
+              <div className="mt-6 flex gap-3">
+                <button 
+                  onClick={() => {
+                    setSelectedProfile(null);
+                    setPrivateChatUser(selectedProfile);
+                  }}
+                  className="flex-1 bg-emerald-600 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors"
+                >
+                  <MessageSquare className="w-5 h-5" />
+                  Chat with {selectedProfile.name.split(' ')[0]}
+                </button>
+                <button 
+                  onClick={() => setSelectedProfile(null)}
+                  className="px-4 py-3 bg-stone-100 text-stone-600 rounded-xl hover:bg-stone-200 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Create Poll Modal */}
+      <AnimatePresence>
+        {showPollModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] bg-black/50 flex items-center justify-center p-4"
+            onClick={() => setShowPollModal(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-2xl p-6 w-full max-w-sm"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-stone-900">Create Poll</h3>
+                <button onClick={() => setShowPollModal(false)} className="text-stone-400 hover:text-stone-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-bold text-stone-700 mb-1 block">Question</label>
+                  <input 
+                    type="text" 
+                    placeholder="What would you like to ask?"
+                    value={pollQuestion}
+                    onChange={(e) => setPollQuestion(e.target.value)}
+                    className="w-full px-4 py-2 rounded-xl border border-stone-200 outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  />
+                </div>
+                
+                <div>
+                  <label className="text-sm font-bold text-stone-700 mb-1 block">Options</label>
+                  {pollOptions.map((option, idx) => (
+                    <div key={idx} className="flex gap-2 mb-2">
+                      <input 
+                        type="text" 
+                        placeholder={`Option ${idx + 1}`}
+                        value={option}
+                        onChange={(e) => {
+                          const newOptions = [...pollOptions];
+                          newOptions[idx] = e.target.value;
+                          setPollOptions(newOptions);
+                        }}
+                        className="flex-1 px-4 py-2 rounded-xl border border-stone-200 outline-none focus:ring-2 focus:ring-emerald-500/20"
+                      />
+                      {pollOptions.length > 2 && (
+                        <button 
+                          onClick={() => setPollOptions(pollOptions.filter((_, i) => i !== idx))}
+                          className="p-2 text-stone-400 hover:text-red-500"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {pollOptions.length < 6 && (
+                    <button 
+                      onClick={() => setPollOptions([...pollOptions, ''])}
+                      className="text-sm text-emerald-600 font-medium hover:text-emerald-700"
+                    >
+                      + Add another option
+                    </button>
+                  )}
+                </div>
+              </div>
+              
+              <div className="mt-6 flex gap-3">
+                <button 
+                  onClick={sendPoll}
+                  className="flex-1 bg-emerald-600 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors"
+                >
+                  <Vote className="w-5 h-5" />
+                  Create Poll
+                </button>
+                <button 
+                  onClick={() => setShowPollModal(false)}
+                  className="px-4 py-3 bg-stone-100 text-stone-600 rounded-xl hover:bg-stone-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
