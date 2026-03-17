@@ -1,6 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { BrowserRouter, Routes, Route, Link, useNavigate, Navigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
+import { InstallBanner } from './components/InstallBanner';
+
+// Toast Context
+const ToastContext = createContext<{
+  showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+} | null>(null);
+
+export const useToast = () => {
+  const context = useContext(ToastContext);
+  if (!context) {
+    throw new Error('useToast must be used within ToastProvider');
+  }
+  return context;
+};
 import { 
   Heart, 
   PiggyBank, 
@@ -431,6 +445,7 @@ const DonationsPage = () => {
   const [donations, setDonations] = useState<Donation[]>([]);
   const [formData, setFormData] = useState({ donorName: '', amount: '', message: '' });
   const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
 
   const fetchDonations = async () => {
     try {
@@ -528,6 +543,7 @@ const DonationsPage = () => {
 
 const BranchesPage = () => {
   const [branches, setBranches] = useState<Branch[]>([]);
+  const { showToast } = useToast();
 
   useEffect(() => {
     fetch('/api/branches')
@@ -603,6 +619,7 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
   const [donationForm, setDonationForm] = useState({ donorName: '', amount: '', message: '' });
   const [requestForm, setRequestForm] = useState({ requesterName: '', contact: '', needDescription: '' });
   const [activeTab, setActiveTab] = useState<'activities' | 'resources' | 'forms'>('activities');
+  const { showToast } = useToast();
 
   const fetchBranch = async () => {
     const res = await fetch(`/api/branches/${id}`);
@@ -645,7 +662,7 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
       body: JSON.stringify({ ...donationForm, amount: parseFloat(donationForm.amount) })
     });
     setDonationForm({ donorName: '', amount: '', message: '' });
-    alert('Thank you for your regional donation!');
+    showToast('Thank you for your regional donation!', 'success');
   };
 
   const handleRequest = async (e: React.FormEvent) => {
@@ -656,7 +673,7 @@ const BranchDetailPage = ({ user }: { user: User | null }) => {
       body: JSON.stringify(requestForm)
     });
     setRequestForm({ requesterName: '', contact: '', needDescription: '' });
-    alert('Your request has been submitted to the regional office.');
+    showToast('Your request has been submitted to the regional office.', 'success');
   };
 
   if (!branch) return <div className="pt-24 text-center">Loading branch details...</div>;
@@ -900,6 +917,7 @@ const Dashboard = ({ user }: { user: User }) => {
   const [loading, setLoading] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const summaryRef = useRef<HTMLDivElement>(null);
+  const { showToast } = useToast();
 
   const fetchData = async () => {
     try {
@@ -955,7 +973,7 @@ const Dashboard = ({ user }: { user: User }) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: user.id, amount: parseFloat(manualPayAmount) })
     });
-    if (!res.ok) alert('Insufficient balance');
+    if (!res.ok) showToast('Insufficient balance', 'error');
     fetchData();
     setLoading(false);
   };
@@ -1189,6 +1207,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showCardForm, setShowCardForm] = useState(false);
+  const { showToast } = useToast();
   const [cardFormData, setCardFormData] = useState({
     fullName: user.card_full_name || user.name,
     phone: user.card_phone || user.phone || '',
@@ -1211,7 +1230,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
   const handleCardRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!cardFormData.photo) {
-      alert('Please upload a passport size photo');
+      showToast('Please upload a passport size photo', 'error');
       return;
     }
     setLoading(true);
@@ -1233,7 +1252,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
       };
       onUpdate(updatedUser);
       setShowCardForm(false);
-      alert('Membership card request submitted successfully');
+      showToast('Membership card request submitted successfully', 'success');
     }
     setLoading(false);
   };
@@ -1250,7 +1269,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
     const data = await res.json();
     if (data.success) {
       onUpdate(data.user);
-      alert('Profile updated successfully');
+      showToast('Profile updated successfully', 'success');
       setFormData({ ...formData, currentPassword: '', newPassword: '' });
     } else {
       setError(data.error);
@@ -1481,6 +1500,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
 const DonationApplicationForm = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [formData, setFormData] = useState({
     vulnerableName: '',
     images: [] as string[],
@@ -1519,7 +1539,7 @@ const DonationApplicationForm = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (formData.images.length < 3) {
-      alert('Please upload at least 3 images.');
+      showToast('Please upload at least 3 images.', 'error');
       return;
     }
     setLoading(true);
@@ -1528,7 +1548,7 @@ const DonationApplicationForm = () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(formData)
     });
-    alert('Application submitted successfully!');
+    showToast('Application submitted successfully!', 'success');
     navigate(`/branch/${id}`);
   };
 
@@ -1615,6 +1635,7 @@ const RegionalAdminDashboard = ({ user }: { user: User }) => {
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [selectedApp, setSelectedApp] = useState<DonationApplication | null>(null);
   const [previewItem, setPreviewItem] = useState<{ type: 'image' | 'document', url: string, name?: string } | null>(null);
+  const { showToast } = useToast();
 
   const downloadFile = (url: string, filename: string) => {
     const link = document.createElement('a');
@@ -1938,7 +1959,7 @@ const RegionalAdminDashboard = ({ user }: { user: User }) => {
                 <button 
                   className="btn-primary px-8"
                   onClick={() => {
-                    alert('Broadcast sent to ' + (broadcastMessage ? broadcastMessage : 'group'));
+                    showToast('Broadcast sent to ' + (broadcastMessage ? broadcastMessage : 'group'), 'success');
                     setBroadcastMessage('');
                   }}
                 >
@@ -2273,6 +2294,7 @@ const MasterAdminDashboard = () => {
   const [newActivity, setNewActivity] = useState({ title: '', description: '' });
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [previewItem, setPreviewItem] = useState<{ type: 'image' | 'document', url: string, name?: string } | null>(null);
+  const { showToast } = useToast();
 
   const downloadFile = (url: string, filename: string) => {
     const link = document.createElement('a');
@@ -2406,8 +2428,16 @@ const MasterAdminDashboard = () => {
 
   const handleDeleteOfficer = async (id: number) => {
     if (confirm('Are you sure you want to delete this officer?')) {
-      await fetch(`/api/admin/master/officers/${id}`, { method: 'DELETE' });
-      fetchData();
+      try {
+        const res = await fetch(`/api/admin/master/officers/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          fetchData();
+        } else {
+          showToast('Failed to delete officer', 'error');
+        }
+      } catch (error) {
+        showToast('Error deleting officer', 'error');
+      }
     }
   };
 
@@ -2423,7 +2453,7 @@ const MasterAdminDashboard = () => {
     });
     setAdminMessage('');
     setMessagingUser(null);
-    alert('Message sent successfully!');
+    showToast('Message sent successfully!', 'success');
   };
 
   const handleWarnUser = async (id: number) => {
@@ -2434,14 +2464,14 @@ const MasterAdminDashboard = () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message })
     });
-    alert('User warned');
+    showToast('User warned', 'success');
     fetchData();
   };
 
   const handleSuspendUser = async (id: number) => {
     if (confirm('Are you sure you want to suspend this user?')) {
       await fetch(`/api/admin/users/${id}/suspend`, { method: 'POST' });
-      alert('User suspended');
+      showToast('User suspended', 'success');
       fetchData();
     }
   };
@@ -2449,7 +2479,7 @@ const MasterAdminDashboard = () => {
   const handleBanUser = async (id: number) => {
     if (confirm('Are you sure you want to ban this user?')) {
       await fetch(`/api/admin/users/${id}/ban`, { method: 'POST' });
-      alert('User banned');
+      showToast('User banned', 'success');
       fetchData();
     }
   };
@@ -2457,7 +2487,7 @@ const MasterAdminDashboard = () => {
   const handleDeleteUser = async (id: number) => {
     if (confirm('CRITICAL: Are you sure you want to delete this user? All their data (savings, donations, card) will be permanently removed.')) {
       await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
-      alert('User deleted');
+      showToast('User deleted', 'success');
       fetchData();
     }
   };
@@ -3172,6 +3202,7 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
   const [error, setError] = useState('');
   const [registeredUser, setRegisteredUser] = useState<User | null>(null);
   const navigate = useNavigate();
+  const { showToast } = useToast();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -3191,7 +3222,7 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
         else navigate('/dashboard');
       } else {
         setRegisteredUser(data.user);
-        alert('Registration successful! Please download your ID card and then login.');
+        showToast('Registration successful! Please download your ID card and then login.', 'success');
       }
     } else {
       setError(data.error || 'Something went wrong');
@@ -3280,6 +3311,57 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
 };
 
 const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onClose: () => void }) => {
+  // MessageContent component for parsing phone numbers and names
+  const MessageContent = ({ text }: { text: string }) => {
+    const [registeredUsers, setRegisteredUsers] = useState<Record<string, boolean>>({});
+    
+    useEffect(() => {
+      // Extract phone numbers from text and check registration
+      const phoneRegex = /(\+?\d{10,15})/g;
+      const phones = text.match(phoneRegex) || [];
+      
+      const checkPhones = async () => {
+        const results: Record<string, boolean> = {};
+        for (const phone of [...new Set(phones)]) {
+          try {
+            const res = await fetch(`/api/user/by-phone?phone=${encodeURIComponent(phone)}`);
+            const data = await res.json();
+            results[phone] = data.exists;
+          } catch {
+            results[phone] = false;
+          }
+        }
+        setRegisteredUsers(results);
+      };
+      
+      if (phones.length > 0) {
+        checkPhones();
+      }
+    }, [text]);
+
+    // Highlight phone numbers
+    const parts = text.split(/(\+?\d{10,15})/g);
+    
+    return (
+      <>
+        {parts.map((part, i) => {
+          const phoneMatch = part.match(/(\+?\d{10,15})/);
+          if (phoneMatch) {
+            const isRegistered = registeredUsers[phoneMatch[1]];
+            return (
+              <span 
+                key={i} 
+                className={isRegistered ? "underline decoration-emerald-500 decoration-2" : "text-red-500 font-bold"}
+              >
+                {part}
+              </span>
+            );
+          }
+          return part;
+        })}
+      </>
+    );
+  };
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [socket, setSocket] = useState<WebSocket | null>(null);
@@ -3287,10 +3369,30 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
   const [previewItem, setPreviewItem] = useState<{ type: 'image' | 'document', url: string, name?: string } | null>(null);
   const [replyingTo, setReplyingTo] = useState<any | null>(null);
   const [editingMessage, setEditingMessage] = useState<any | null>(null);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [privateChatUser, setPrivateChatUser] = useState<any | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Search for users
+  const handleSearch = async (query: string) => {
+    setSearchQuery(query);
+    if (query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/users/search?q=${encodeURIComponent(query)}`);
+      const data = await res.json();
+      setSearchResults(data.users || []);
+    } catch (error) {
+      console.error('Search error:', error);
+    }
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -3331,7 +3433,7 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
       } else if (data.type === 'read_update') {
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, read_by: data.readBy } : m));
       } else if (data.type === 'delete_update') {
-        setMessages(prev => prev.filter(m => m.id !== data.messageId));
+        setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, message: '', deleted_by: data.deletedBy } : m));
       } else if (data.type === 'edit_update') {
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, message: data.newMessage } : m));
       }
@@ -3406,7 +3508,7 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
 
   const deleteMessage = (messageId: number) => {
     if (!socket) return;
-    socket.send(JSON.stringify({ type: 'delete', messageId, userId: user.id }));
+    socket.send(JSON.stringify({ type: 'delete', messageId, userId: user.id, userName: user.name }));
   };
 
   const startEdit = (msg: any) => {
@@ -3464,13 +3566,57 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           <X className="w-6 h-6" />
         </button>
         <div className="text-center">
-          <h2 className="text-lg font-bold">Community Chat</h2>
-          <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">ASMIN Uganda</p>
+          <h2 className="text-lg font-bold">{privateChatUser ? privateChatUser.name : 'Community Chat'}</h2>
+          <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">
+            {privateChatUser ? privateChatUser.phone || privateChatUser.email : 'ASMIN Uganda'}
+          </p>
         </div>
-        <button className="p-2 -mr-2 text-stone-400">
-          <MoreHorizontal className="w-6 h-6" />
+        <button onClick={() => setShowSearch(!showSearch)} className="p-2 -mr-2 text-stone-400">
+          <Search className="w-6 h-6" />
         </button>
       </div>
+
+      {/* Search Results */}
+      {showSearch && (
+        <div className="border-b border-stone-100 p-3 bg-stone-50">
+          <input
+            type="text"
+            placeholder="Search by name or phone..."
+            value={searchQuery}
+            onChange={(e) => handleSearch(e.target.value)}
+            className="w-full px-4 py-2 rounded-xl border border-stone-200 outline-none text-sm"
+            autoFocus
+          />
+          {searchResults.length > 0 && (
+            <div className="mt-2 space-y-2 max-h-48 overflow-y-auto">
+              {searchResults.map((result) => (
+                <button
+                  key={result.id}
+                  onClick={() => {
+                    setPrivateChatUser(result);
+                    setShowSearch(false);
+                    setSearchQuery('');
+                    setSearchResults([]);
+                  }}
+                  className="w-full flex items-center gap-3 p-2 hover:bg-white rounded-xl transition-colors text-left"
+                >
+                  {result.photo ? (
+                    <img src={result.photo} alt={result.name} className="w-10 h-10 rounded-full object-cover" />
+                  ) : (
+                    <div className="w-10 h-10 rounded-full bg-stone-200 flex items-center justify-center">
+                      <UserIcon className="w-5 h-5 text-stone-500" />
+                    </div>
+                  )}
+                  <div className="flex-1">
+                    <p className="font-bold text-sm text-stone-900">{result.name}</p>
+                    <p className="text-xs text-stone-500">{result.phone || result.email}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 no-scrollbar">
@@ -3491,21 +3637,16 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                     setEditingMessage(null);
                   } else if (info.offset.x < -50) {
                     if (isMe) {
-                      if (confirm('Delete this message?')) {
-                        deleteMessage(msg.id);
-                      }
+                      deleteMessage(msg.id);
                     }
                   }
                 }}
                 dragSnapToOrigin
                 className={cn("flex gap-3 relative z-10 bg-white", isMe ? "flex-row-reverse" : "flex-row")}
               >
-                {/* Swipe Indicators */}
+                {/* Swipe Indicator */}
                 <div className="absolute inset-y-0 left-0 flex items-center pl-4 -z-10 text-emerald-500">
                   <Reply className="w-5 h-5" />
-                </div>
-                <div className="absolute inset-y-0 right-0 flex items-center pr-4 -z-10 text-red-500">
-                  <Trash2 className="w-5 h-5" />
                 </div>
 
                 {/* Profile Photo */}
@@ -3614,7 +3755,15 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                     </div>
                   )}
 
-                  <p className="text-[12px] leading-relaxed">{msg.message}</p>
+                  <p className="text-[12px] leading-relaxed">
+                    {msg.deleted_by ? (
+                      <span className="italic opacity-50 text-[11px]">
+                        Message deleted by {msg.deleted_by}
+                      </span>
+                    ) : (
+                      <MessageContent text={msg.message} />
+                    )}
+                  </p>
                   
                   {/* Reactions */}
                   {Object.keys(reactions).length > 0 && (
@@ -4322,6 +4471,12 @@ export default function App() {
     }
   });
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const handleLogin = (userData: User) => {
     setUser(userData);
@@ -4345,21 +4500,23 @@ export default function App() {
   };
 
   return (
-    <BrowserRouter>
-      <div className="min-h-screen bg-[#fdfcf9]">
-        {user && <NotificationBanner user={user} />}
-        <Navbar user={user} onLogout={handleLogout} />
-        <main className="pb-24 md:pb-0">
-          <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/donations" element={<DonationsPage />} />
-            <Route path="/branches" element={<BranchesPage />} />
-            <Route path="/branch/:id" element={<BranchDetailPage user={user} />} />
-            <Route path="/branch/:id/apply" element={<DonationApplicationForm />} />
-            <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <AuthPage onLogin={handleLogin} />} />
-            <Route path="/dashboard" element={user ? <Dashboard user={user} /> : <Navigate to="/login" />} />
-            <Route path="/profile" element={user ? <ProfilePage user={user} onUpdate={handleLogin} /> : <Navigate to="/login" />} />
-            <Route path="/admin/regional" element={user?.role === 'regional_officer' ? <RegionalAdminDashboard user={user} /> : <Navigate to="/login" />} />
+    <ToastContext.Provider value={{ showToast }}>
+      <BrowserRouter>
+        <div className="min-h-screen bg-[#fdfcf9]">
+          {user && <NotificationBanner user={user} />}
+          <Navbar user={user} onLogout={handleLogout} />
+          <InstallBanner />
+          <main className="pb-24 md:pb-0">
+            <Routes>
+              <Route path="/" element={<LandingPage />} />
+              <Route path="/donations" element={<DonationsPage />} />
+              <Route path="/branches" element={<BranchesPage />} />
+              <Route path="/branch/:id" element={<BranchDetailPage user={user} />} />
+              <Route path="/branch/:id/apply" element={<DonationApplicationForm />} />
+              <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <AuthPage onLogin={handleLogin} />} />
+              <Route path="/dashboard" element={user ? <Dashboard user={user} /> : <Navigate to="/login" />} />
+              <Route path="/profile" element={user ? <ProfilePage user={user} onUpdate={handleLogin} /> : <Navigate to="/login" />} />
+              <Route path="/admin/regional" element={user?.role === 'regional_officer' ? <RegionalAdminDashboard user={user} /> : <Navigate to="/login" />} />
             <Route path="/admin/master" element={user?.role === 'master_admin' ? <MasterAdminDashboard /> : <Navigate to="/login" />} />
             <Route path="/events" element={<EventsPage user={user} />} />
             <Route path="/chat" element={user ? <ChatRoom user={user} isOpen={true} onClose={() => window.history.back()} /> : <Navigate to="/login" />} />
@@ -4388,7 +4545,32 @@ export default function App() {
             </div>
           </div>
         </footer>
+
+        {/* Toast Notification */}
+        <AnimatePresence>
+          {toast && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className={`fixed bottom-24 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 ${
+                toast.type === 'success' ? 'bg-emerald-600 text-white' :
+                toast.type === 'error' ? 'bg-red-600 text-white' :
+                'bg-stone-800 text-white'
+              }`}
+            >
+              {toast.type === 'success' && <CheckCircle className="w-5 h-5" />}
+              {toast.type === 'error' && <XCircle className="w-5 h-5" />}
+              {toast.type === 'info' && <Info className="w-5 h-5" />}
+              <span className="font-medium text-sm">{toast.message}</span>
+              <button onClick={() => setToast(null)} className="ml-2 hover:opacity-80">
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </BrowserRouter>
+    </ToastContext.Provider>
   );
 }

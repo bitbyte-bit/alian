@@ -5,6 +5,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
+import { v4 as uuidv4 } from "uuid";
+import bcrypt from "bcrypt";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const db = new Database("asmin.db");
@@ -139,6 +142,7 @@ db.exec(`
     timestamp TEXT,
     reactions TEXT DEFAULT '{}',
     read_by TEXT DEFAULT '[]',
+    deleted_by TEXT,
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
 
@@ -208,7 +212,8 @@ ensureColumn('chat_messages', 'reply_to', 'TEXT'); // JSON string of the replied
 // Seed master admin if empty
 const adminExists = db.prepare("SELECT * FROM users WHERE email = 'asminadmin@gmail.com'").get();
 if (!adminExists) {
-    db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)").run('asminadmin@gmail.com', 'asminadmin', 'Master Admin', 'master_admin');
+    const hashedPassword = await bcrypt.hash('asminadmin', 10);
+    db.prepare("INSERT INTO users (id, email, password, name, role) VALUES (?, ?, ?, ?, ?)").run(uuidv4(), 'asminadmin@gmail.com', hashedPassword, 'Master Admin', 'master_admin');
 }
 // Seed branches if empty
 const branchCount = db.prepare("SELECT COUNT(*) as count FROM branches").get();
@@ -269,11 +274,12 @@ async function startServer() {
                     });
                 }
                 else if (payload.type === "delete") {
-                    const { messageId, userId } = payload;
+                    const { messageId, userId, userName } = payload;
                     const msg = db.prepare("SELECT user_id FROM chat_messages WHERE id = ?").get(messageId);
                     if (msg && msg.user_id === userId) {
-                        db.prepare("DELETE FROM chat_messages WHERE id = ?").run(messageId);
-                        const broadcastData = JSON.stringify({ type: "delete_update", messageId });
+                        // Instead of deleting, mark as deleted
+                        db.prepare("UPDATE chat_messages SET message = '', deleted_by = ? WHERE id = ?").run(userName || 'Unknown', messageId);
+                        const broadcastData = JSON.stringify({ type: "delete_update", messageId, deletedBy: userName || 'Unknown' });
                         clients.forEach(client => {
                             if (client.readyState === WebSocket.OPEN) {
                                 client.send(broadcastData);
@@ -356,35 +362,55 @@ async function startServer() {
     });
     // --- API Routes ---
     // Auth (Simplified for demo)
-    app.post("/api/auth/register", (req, res) => {
+    app.post("/api/auth/register", async (req, res) => {
         const { email, password, name } = req.body;
         try {
-            const info = db.prepare("INSERT INTO users (email, password, name) VALUES (?, ?, ?)").run(email, password, name);
-            db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(info.lastInsertRowid);
-            res.json({ success: true, userId: info.lastInsertRowid });
+            const userId = uuidv4();
+            const hashedPassword = await bcrypt.hash(password, 10);
+            db.prepare("INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)").run(userId, email, hashedPassword, name);
+            db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(userId);
+            res.json({ success: true, userId });
         }
         catch (e) {
             res.status(400).json({ error: "Email already exists" });
         }
     });
-    app.post("/api/auth/login", (req, res) => {
+    app.post("/api/auth/login", async (req, res) => {
         const { email, password } = req.body;
-        const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
-        if (user) {
-            res.json({ success: true, user: { id: user.id, name: user.name, email: user.email, role: user.role, branch_id: user.branch_id, photo: user.photo } });
+        const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+        if (user && await bcrypt.compare(password, user.password)) {
+            res.json({ success: true, user: { 
+                id: user.id, 
+                name: user.name, 
+                email: user.email, 
+                role: user.role, 
+                branch_id: user.branch_id, 
+                photo: user.photo,
+                card_status: user.card_status,
+                card_id: user.card_id,
+                card_full_name: user.card_full_name,
+                card_phone: user.card_phone,
+                card_photo: user.card_photo,
+                card_issued_at: user.card_issued_at,
+                card_expires_at: user.card_expires_at,
+                location: user.location
+            } });
         }
         else {
             res.status(401).json({ error: "Invalid credentials" });
         }
     });
     // Profile Management
-    app.post("/api/profile/update", (req, res) => {
+    app.post("/api/profile/update", async (req, res) => {
         const { userId, name, email, phone, bio, photo, currentPassword, newPassword } = req.body;
         const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-        if (user.password !== currentPassword) {
+        if (!await bcrypt.compare(currentPassword, user.password)) {
             return res.status(401).json({ error: "Incorrect current password" });
         }
-        const passwordToSet = newPassword || currentPassword;
+        let passwordToSet = user.password;
+        if (newPassword) {
+            passwordToSet = await bcrypt.hash(newPassword, 10);
+        }
         // Check if email is being changed and if it's already taken
         if (email !== user.email) {
             const emailTaken = db.prepare("SELECT id FROM users WHERE email = ? AND id != ?").get(email, userId);
@@ -394,7 +420,23 @@ async function startServer() {
         }
         db.prepare("UPDATE users SET name = ?, email = ?, phone = ?, bio = ?, photo = ?, password = ? WHERE id = ?")
             .run(name, email, phone, bio, photo, passwordToSet, userId);
-        res.json({ success: true, user: { id: userId, name, email, role: user.role, branch_id: user.branch_id, photo } });
+        const updatedUser = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+        res.json({ success: true, user: { 
+            id: userId, 
+            name, 
+            email, 
+            role: user.role, 
+            branch_id: user.branch_id, 
+            photo,
+            card_status: updatedUser.card_status,
+            card_id: updatedUser.card_id,
+            card_full_name: updatedUser.card_full_name,
+            card_phone: updatedUser.card_phone,
+            card_photo: updatedUser.card_photo,
+            card_issued_at: updatedUser.card_issued_at,
+            card_expires_at: updatedUser.card_expires_at,
+            location: updatedUser.location
+        } });
     });
     // Donation Applications
     app.post("/api/branches/:id/apply", (req, res) => {
@@ -471,7 +513,7 @@ async function startServer() {
         const officers = db.prepare("SELECT id, name, email, role, branch_id FROM users WHERE role = 'regional_officer'").all();
         res.json(officers);
     });
-    app.post("/api/admin/master/officers", (req, res) => {
+    app.post("/api/admin/master/officers", async (req, res) => {
         const { name, email, password, branchName, isHeadOffice } = req.body;
         try {
             // If this is a head office, unset other head offices first
@@ -491,18 +533,29 @@ async function startServer() {
                     db.prepare("UPDATE branches SET is_head_office = 1 WHERE id = ?").run(branch.id);
                 }
             }
-            db.prepare("INSERT INTO users (name, email, password, role, branch_id) VALUES (?, ?, ?, 'regional_officer', ?)")
-                .run(name, email, password, branch.id);
+            const hashedPassword = await bcrypt.hash(password, 10);
+            const userId = uuidv4();
+            db.prepare("INSERT INTO users (id, name, email, password, role, branch_id) VALUES (?, ?, ?, ?, 'regional_officer', ?)")
+                .run(userId, name, email, hashedPassword, branch.id);
             res.json({ success: true });
         }
         catch (e) {
             res.status(400).json({ error: "Email already exists or database error" });
         }
     });
-    app.put("/api/admin/master/officers/:id", (req, res) => {
+    app.put("/api/admin/master/officers/:id", async (req, res) => {
         const { name, email, password, branchId } = req.body;
-        db.prepare("UPDATE users SET name = ?, email = ?, password = ?, branch_id = ? WHERE id = ?")
-            .run(name, email, password, branchId, req.params.id);
+        let hashedPassword = undefined;
+        if (password) {
+            hashedPassword = await bcrypt.hash(password, 10);
+        }
+        if (hashedPassword) {
+            db.prepare("UPDATE users SET name = ?, email = ?, password = ?, branch_id = ? WHERE id = ?")
+                .run(name, email, hashedPassword, branchId, req.params.id);
+        } else {
+            db.prepare("UPDATE users SET name = ?, email = ?, branch_id = ? WHERE id = ?")
+                .run(name, email, branchId, req.params.id);
+        }
         res.json({ success: true });
     });
     app.delete("/api/admin/master/officers/:id", (req, res) => {
@@ -673,6 +726,51 @@ async function startServer() {
     app.post("/api/notifications/:id/read", (req, res) => {
         db.prepare("UPDATE notifications SET read = 1 WHERE id = ?").run(req.params.id);
         res.json({ success: true });
+    });
+    // User refresh endpoint to get updated card data
+    app.get("/api/user/:id", (req, res) => {
+        const user = db.prepare("SELECT * FROM users WHERE id = ?").get(req.params.id);
+        if (user) {
+            res.json({ 
+                id: user.id, 
+                name: user.name, 
+                email: user.email, 
+                role: user.role, 
+                branch_id: user.branch_id, 
+                photo: user.photo,
+                phone: user.phone,
+                bio: user.bio,
+                status: user.status,
+                card_status: user.card_status,
+                card_id: user.card_id,
+                card_full_name: user.card_full_name,
+                card_phone: user.card_phone,
+                card_photo: user.card_photo,
+                card_issued_at: user.card_issued_at,
+                card_expires_at: user.card_expires_at,
+                card_rejection_reason: user.card_rejection_reason,
+                location: user.location
+            });
+        } else {
+            res.status(404).json({ error: "User not found" });
+        }
+    });
+    // Check if phone number is registered
+    app.get("/api/user/by-phone", (req, res) => {
+        const { phone } = req.query;
+        const user = db.prepare("SELECT id FROM users WHERE phone = ?").get(phone);
+        res.json({ exists: !!user });
+    });
+    // Search users by name or phone
+    app.get("/api/users/search", (req, res) => {
+        const q = req.query.q;
+        if (!q || String(q).length < 2) {
+            return res.json({ users: [] });
+        }
+        const users = db.prepare(
+            "SELECT id, name, email, phone, photo FROM users WHERE name LIKE ? OR phone LIKE ? LIMIT 10"
+        ).all(`%${q}%`, `%${q}%`);
+        res.json({ users });
     });
     // Membership Card Management
     app.post("/api/card/request", (req, res) => {
