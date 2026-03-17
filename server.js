@@ -120,7 +120,7 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS accounts (
-    user_id INTEGER PRIMARY KEY,
+    user_id TEXT PRIMARY KEY,
     balance REAL DEFAULT 0,
     auto_pay_asmin INTEGER DEFAULT 0, -- 0 for manual, 1 for auto
     FOREIGN KEY(user_id) REFERENCES users(id)
@@ -197,14 +197,20 @@ db.exec(`
     user_id INTEGER,
     user_name TEXT,
     user_photo TEXT,
+    user_phone TEXT,
     message TEXT,
     image TEXT,
     document TEXT,
     document_name TEXT,
+    video TEXT,
+    audio TEXT,
+    poll TEXT,
+    private_to TEXT,
     timestamp TEXT,
     reactions TEXT DEFAULT '{}',
     read_by TEXT DEFAULT '[]',
     deleted_by TEXT,
+    reply_to TEXT,
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
 
@@ -286,7 +292,14 @@ ensureColumn('chat_messages', 'document_name', 'TEXT');
 ensureColumn('chat_messages', 'user_photo', 'TEXT');
 ensureColumn('chat_messages', 'reactions', "TEXT DEFAULT '{}'");
 ensureColumn('chat_messages', 'read_by', "TEXT DEFAULT '[]'");
+ensureColumn('chat_messages', 'user_phone', 'TEXT');
+ensureColumn('chat_messages', 'video', 'TEXT');
+ensureColumn('chat_messages', 'audio', 'TEXT');
+ensureColumn('chat_messages', 'poll', 'TEXT');
+ensureColumn('chat_messages', 'private_to', 'TEXT');
 ensureColumn('chat_messages', 'reply_to', 'TEXT'); // JSON string of the replied message
+ensureColumn('push_subscriptions', 'user_id', 'TEXT');
+ensureColumn('unread_messages', 'user_id', 'TEXT');
 // Seed master admin if empty
 const adminExists = db.prepare("SELECT * FROM users WHERE email = 'asminadmin@gmail.com'").get();
 if (!adminExists) {
@@ -315,9 +328,38 @@ async function startServer() {
     app.use(express.json({ limit: '50mb' }));
     app.use(express.urlencoded({ limit: '50mb', extended: true }));
     const PORT = 3000;
+    
+    // Helper function to resolve phone number, username, or user ID to user ID
+    const resolveUserId = (identifier) => {
+        if (!identifier) return null;
+        
+        // If it's already a valid UUID format, check if user exists
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (uuidRegex.test(identifier)) {
+            const user = db.prepare("SELECT id FROM users WHERE id = ?").get(identifier);
+            if (user) return user.id;
+        }
+        
+        // Try to find by phone number (exact match)
+        const userByPhone = db.prepare("SELECT id FROM users WHERE phone = ?").get(identifier);
+        if (userByPhone) return userByPhone.id;
+        
+        // Try to find by name (case-insensitive partial match)
+        const userByName = db.prepare("SELECT id FROM users WHERE LOWER(name) = LOWER(?)").get(identifier);
+        if (userByName) return userByName.id;
+        
+        // Try to find by email
+        const userByEmail = db.prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)").get(identifier);
+        if (userByEmail) return userByEmail.id;
+        
+        return null;
+    };
+
     // --- WebSocket Logic ---
     const clients = new Set();
-    wss.on("connection", (ws) => {
+    const clientUserIds = new Map(); // Map WebSocket connections to user IDs
+    
+    wss.on("connection", (ws, req) => {
         clients.add(ws);
         // Send message history
         const history = db.prepare("SELECT * FROM chat_messages ORDER BY timestamp ASC LIMIT 100").all();
@@ -325,6 +367,23 @@ async function startServer() {
         ws.on("message", (data) => {
             try {
                 const payload = JSON.parse(data.toString());
+                
+                // Register user ID with WebSocket connection
+                if (payload.type === "register") {
+                    const { userId } = payload;
+                    clientUserIds.set(ws, userId);
+                    // Send any unread private messages to this user
+                    const unreadPrivate = db.prepare(`
+                        SELECT * FROM chat_messages 
+                        WHERE private_to = ? AND user_id != ?
+                        ORDER BY timestamp DESC LIMIT 50
+                    `).all(userId, userId);
+                    if (unreadPrivate.length > 0) {
+                        ws.send(JSON.stringify({ type: "unread_private", messages: unreadPrivate }));
+                    }
+                    return;
+                }
+                
                 if (payload.type === "message") {
                     const { userId, userName, userPhoto, userPhone, message, image, document, documentName, video, audio, poll, privateTo, replyTo } = payload;
                     const timestamp = new Date().toISOString();
@@ -353,23 +412,52 @@ async function startServer() {
                     
                     // Send to relevant clients (all for community, only specific user for private)
                     const broadcastData = JSON.stringify({ type: "message", message: newMessage });
-                    clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(broadcastData);
-                        }
-                    });
                     
-                    // Send push notifications to all users except the sender
-                    const allUsers = db.prepare('SELECT DISTINCT user_id FROM chat_messages').all();
-                    for (const u of allUsers) {
-                        if (u.user_id !== userId) {
-                            sendPushNotification(u.user_id, `New message from ${userName}`, message.substring(0, 50) + (message.length > 50 ? '...' : ''));
-                            // Update unread count
-                            const existing = db.prepare('SELECT count FROM unread_messages WHERE user_id = ?').get(u.user_id);
+                    if (privateTo) {
+                        // For private messages, only send to the specific recipient
+                        clients.forEach(client => {
+                            // Get the userId associated with this client connection
+                            const clientUserId = clientUserIds.get(client);
+                            if (clientUserId === privateTo && client.readyState === WebSocket.OPEN) {
+                                client.send(broadcastData);
+                            }
+                        });
+                    } else {
+                        // For community messages, send to all clients
+                        clients.forEach(client => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(broadcastData);
+                            }
+                        });
+                    }
+                    
+                    // Send push notifications - either to specific recipient (private) or all users (community)
+                    if (privateTo) {
+                        // Private message - send to specific recipient only
+                        const recipientId = resolveUserId(privateTo);
+                        if (recipientId && recipientId !== userId) {
+                            sendPushNotification(recipientId, `Private message from ${userName}`, message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+                            // Update unread count for recipient
+                            const existing = db.prepare('SELECT count FROM unread_messages WHERE user_id = ?').get(recipientId);
                             if (existing) {
-                                db.prepare('UPDATE unread_messages SET count = count + 1, last_updated = CURRENT_TIMESTAMP WHERE user_id = ?').run(u.user_id);
+                                db.prepare('UPDATE unread_messages SET count = count + 1, last_updated = CURRENT_TIMESTAMP WHERE user_id = ?').run(recipientId);
                             } else {
-                                db.prepare('INSERT INTO unread_messages (user_id, count) VALUES (?, 1)').run(u.user_id);
+                                db.prepare('INSERT INTO unread_messages (user_id, count) VALUES (?, 1)').run(recipientId);
+                            }
+                        }
+                    } else {
+                        // Community message - send to all users except the sender
+                        const allUsers = db.prepare('SELECT DISTINCT user_id FROM chat_messages').all();
+                        for (const u of allUsers) {
+                            if (u.user_id !== userId) {
+                                sendPushNotification(u.user_id, `New message from ${userName}`, message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+                                // Update unread count
+                                const existing = db.prepare('SELECT count FROM unread_messages WHERE user_id = ?').get(u.user_id);
+                                if (existing) {
+                                    db.prepare('UPDATE unread_messages SET count = count + 1, last_updated = CURRENT_TIMESTAMP WHERE user_id = ?').run(u.user_id);
+                                } else {
+                                    db.prepare('INSERT INTO unread_messages (user_id, count) VALUES (?, 1)').run(u.user_id);
+                                }
                             }
                         }
                     }
@@ -491,40 +579,60 @@ async function startServer() {
     // --- API Routes ---
     // Auth
     app.post("/api/auth/register", async (req, res) => {
-        const { email, password, name, phone } = req.body;
-        
-        // Server-side password validation
-        if (!password || password.length < 6) {
-            return res.status(400).json({ error: 'Password must be at least 6 characters long' });
-        }
-        if (!/[A-Z]/.test(password)) {
-            return res.status(400).json({ error: 'Password must contain at least one uppercase letter' });
-        }
-        if (!/[a-z]/.test(password)) {
-            return res.status(400).json({ error: 'Password must contain at least one lowercase letter' });
-        }
-        if (!/\d/.test(password)) {
-            return res.status(400).json({ error: 'Password must contain at least one digit' });
-        }
-        if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
-            return res.status(400).json({ error: 'Password must contain at least one symbol (!@#$%^&* etc.)' });
-        }
-        
         try {
+            console.log('Request body:', req.body);
+            const { email, password, name, phone } = req.body || {};
+            
+            console.log('Registration attempt:', { email, name });
+            
+            // Validate required fields
+            if (!email || typeof email !== 'string' || !email.includes('@')) {
+                return res.status(400).json({ error: 'Valid email is required' });
+            }
+            if (!name || typeof name !== 'string' || name.trim().length === 0) {
+                return res.status(400).json({ error: 'Name is required' });
+            }
+            if (!password || typeof password !== 'string' || password.length < 6) {
+                return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+            }
+            if (!/[A-Z]/.test(password)) {
+                return res.status(400).json({ error: 'Password must contain at least one uppercase letter' });
+            }
+            if (!/[a-z]/.test(password)) {
+                return res.status(400).json({ error: 'Password must contain at least one lowercase letter' });
+            }
+            if (!/\d/.test(password)) {
+                return res.status(400).json({ error: 'Password must contain at least one digit' });
+            }
+            if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+                return res.status(400).json({ error: 'Password must contain at least one symbol (!@#$%^&* etc.)' });
+            }
+            
             const userId = uuidv4();
             const hashedPassword = await bcrypt.hash(password, 10);
+            console.log('Inserting user:', { userId, email, name });
             db.prepare("INSERT INTO users (id, email, password, name, phone) VALUES (?, ?, ?, ?, ?)").run(userId, email, hashedPassword, name, phone || '');
+            console.log('Inserting account for user:', userId);
             db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(userId);
+            
+            // Verify the user was inserted
+            const verifyUser = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+            console.log('User inserted:', verifyUser);
+            
             res.json({ success: true, userId });
         }
         catch (e) {
-            res.status(400).json({ error: "Email already exists" });
+            console.error('Registration error:', e);
+            res.status(400).json({ error: "Email already exists or invalid data" });
         }
     });
     app.post("/api/auth/login", async (req, res) => {
         const { email, password } = req.body;
+        console.log('Login attempt:', email);
         const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+        console.log('User found:', user ? 'yes' : 'no', user?.email);
         if (user && await bcrypt.compare(password, user.password)) {
+            console.log('Password match: yes');
             res.json({ success: true, user: { 
                 id: user.id, 
                 name: user.name, 
@@ -613,22 +721,28 @@ async function startServer() {
     // Function to send push notification to a user
     const sendPushNotification = async (userId, title, message) => {
         try {
-            const subscriptions = db.prepare('SELECT subscription FROM push_subscriptions WHERE user_id = ?').all(userId);
+            const subscriptions = db.prepare('SELECT id, subscription FROM push_subscriptions WHERE user_id = ?').all(userId);
             
             for (const sub of subscriptions) {
-                const subscription = JSON.parse(sub.subscription);
-                await webpush.sendNotification(subscription, JSON.stringify({
-                    title,
-                    message,
-                    icon: '/icon-192.png'
-                }));
+                try {
+                    const subscription = JSON.parse(sub.subscription);
+                    await webpush.sendNotification(subscription, JSON.stringify({
+                        title,
+                        message,
+                        icon: '/icon-192.png'
+                    }));
+                    console.log(`Push notification sent successfully to user ${userId}`);
+                } catch (subError) {
+                    console.error(`Error sending push to subscription ${sub.id}:`, subError.message);
+                    // Remove only this invalid subscription
+                    if (subError.statusCode === 410 || subError.statusCode === 404) {
+                        console.log(`Removing expired/invalid subscription ${sub.id} for user ${userId}`);
+                        db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(sub.id);
+                    }
+                }
             }
         } catch (e) {
-            console.error('Error sending push notification:', e);
-            // Remove invalid subscriptions
-            if (e.statusCode === 410) {
-                db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').run(userId);
-            }
+            console.error('Error fetching push subscriptions:', e);
         }
     };
     // Profile Management
@@ -809,8 +923,14 @@ async function startServer() {
         res.json({ success: true });
     });
     app.delete("/api/admin/master/officers/:id", (req, res) => {
-        db.prepare("DELETE FROM users WHERE id = ?").run(req.params.id);
-        res.json({ success: true });
+        const { id } = req.params;
+        try {
+            db.prepare("DELETE FROM users WHERE id = ?").run(id);
+            res.json({ success: true });
+        } catch (err) {
+            console.error('Delete officer error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
     });
     app.get("/api/admin/master/branches", (req, res) => {
         const branches = db.prepare("SELECT * FROM branches").all();
@@ -830,11 +950,17 @@ async function startServer() {
         res.json({ success: true });
     });
     app.delete("/api/admin/master/branches/:id", (req, res) => {
-        db.prepare("DELETE FROM branches WHERE id = ?").run(req.params.id);
-        db.prepare("DELETE FROM activities WHERE branch_id = ?").run(req.params.id);
-        db.prepare("DELETE FROM resources WHERE branch_id = ?").run(req.params.id);
-        db.prepare("UPDATE users SET branch_id = NULL WHERE branch_id = ?").run(req.params.id);
-        res.json({ success: true });
+        const { id } = req.params;
+        try {
+            db.prepare("DELETE FROM branches WHERE id = ?").run(id);
+            db.prepare("DELETE FROM activities WHERE branch_id = ?").run(id);
+            db.prepare("DELETE FROM resources WHERE branch_id = ?").run(id);
+            db.prepare("UPDATE users SET branch_id = NULL WHERE branch_id = ?").run(id);
+            res.json({ success: true });
+        } catch (err) {
+            console.error('Delete branch error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
     });
     app.put("/api/admin/master/activities/:id", (req, res) => {
         const { title, description, status } = req.body;
@@ -843,13 +969,24 @@ async function startServer() {
         res.json({ success: true });
     });
     app.delete("/api/admin/master/activities/:id", (req, res) => {
-        db.prepare("DELETE FROM activities WHERE id = ?").run(req.params.id);
-        res.json({ success: true });
+        const { id } = req.params;
+        try {
+            db.prepare("DELETE FROM activities WHERE id = ?").run(id);
+            res.json({ success: true });
+        } catch (err) {
+            console.error('Delete activity error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
     });
     // Account & Savings
     app.get("/api/account/:userId", (req, res) => {
-        const account = db.prepare("SELECT * FROM accounts WHERE user_id = ?").get(req.params.userId);
-        res.json(account || null);
+        let account = db.prepare("SELECT * FROM accounts WHERE user_id = ?").get(req.params.userId);
+        // Auto-create account if it doesn't exist
+        if (!account) {
+            db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(req.params.userId);
+            account = db.prepare("SELECT * FROM accounts WHERE user_id = ?").get(req.params.userId);
+        }
+        res.json(account);
     });
     app.post("/api/account/deposit", (req, res) => {
         const { userId, amount } = req.body;
@@ -912,8 +1049,14 @@ async function startServer() {
         res.json({ success: true });
     });
     app.delete("/api/resources/:id", (req, res) => {
-        db.prepare("DELETE FROM resources WHERE id = ?").run(req.params.id);
-        res.json({ success: true });
+        const { id } = req.params;
+        try {
+            db.prepare("DELETE FROM resources WHERE id = ?").run(id);
+            res.json({ success: true });
+        } catch (err) {
+            console.error('Delete resource error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
     });
     app.post("/api/branches/:id/donate", (req, res) => {
         const { donorName, amount, message } = req.body;
@@ -1022,6 +1165,54 @@ async function startServer() {
         ).all(`%${q}%`, `%${q}%`);
         res.json({ users });
     });
+
+    // Get user by phone number for private messaging
+    app.get("/api/user/by-phone/:phone", (req, res) => {
+        const phone = req.params.phone;
+        const user = db.prepare("SELECT id, name, email, phone, photo FROM users WHERE phone = ?").get(phone);
+        if (user) {
+            res.json({ user });
+        } else {
+            res.status(404).json({ error: "User not found" });
+        }
+    });
+
+    // Get user by ID
+    app.get("/api/user/by-id/:id", (req, res) => {
+        const id = req.params.id;
+        const user = db.prepare("SELECT id, name, email, phone, photo FROM users WHERE id = ?").get(id);
+        if (user) {
+            res.json({ user });
+        } else {
+            res.status(404).json({ error: "User not found" });
+        }
+    });
+
+    // Get private messages for user inbox (supports phone, username, or user ID)
+    app.get("/api/messages/private/:identifier", (req, res) => {
+        const identifier = req.params.identifier;
+        const userId = resolveUserId(identifier);
+        
+        if (!userId) {
+            return res.status(404).json({ error: "User not found" });
+        }
+        
+        // Get all private messages where user is the recipient
+        const messages = db.prepare(`
+            SELECT * FROM chat_messages 
+            WHERE private_to = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 100
+        `).all(userId);
+        // Also get messages sent by user
+        const sentMessages = db.prepare(`
+            SELECT * FROM chat_messages 
+            WHERE user_id = ? AND private_to IS NOT NULL
+            ORDER BY timestamp DESC
+            LIMIT 100
+        `).all(userId);
+        res.json({ received: messages, sent: sentMessages });
+    });
     // Membership Card Management
     app.post("/api/card/request", (req, res) => {
         const { userId, fullName, phone, photo } = req.body;
@@ -1086,9 +1277,18 @@ async function startServer() {
     });
     app.delete("/api/admin/users/:id", (req, res) => {
         const { id } = req.params;
-        db.prepare("DELETE FROM users WHERE id = ?").run(id);
-        db.prepare("DELETE FROM accounts WHERE user_id = ?").run(id);
-        res.json({ success: true });
+        try {
+            // Delete from all related tables first
+            db.prepare("DELETE FROM transactions WHERE user_id = ?").run(id);
+            db.prepare("DELETE FROM donations WHERE user_id = ?").run(id);
+            db.prepare("DELETE FROM accounts WHERE user_id = ?").run(id);
+            db.prepare("DELETE FROM notifications WHERE user_id = ?").run(id);
+            db.prepare("DELETE FROM users WHERE id = ?").run(id);
+            res.json({ success: true });
+        } catch (err) {
+            console.error('Delete user error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
     });
     // 404 for API routes
     app.use("/api/*", (req, res) => {

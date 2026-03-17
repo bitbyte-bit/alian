@@ -929,12 +929,14 @@ const Dashboard = ({ user }: { user: User }) => {
   const [depositAmount, setDepositAmount] = useState('');
   const [manualPayAmount, setManualPayAmount] = useState('2000');
   const [loading, setLoading] = useState(false);
+  const [dataLoading, setDataLoading] = useState(true);
   const [showConfirm, setShowConfirm] = useState(false);
   const summaryRef = useRef<HTMLDivElement>(null);
   const { showToast } = useToast();
 
   const fetchData = async () => {
     try {
+      setDataLoading(true);
       const [accRes, transRes] = await Promise.all([
         fetch(`/api/account/${user.id}`),
         fetch(`/api/transactions/${user.id}`)
@@ -942,6 +944,7 @@ const Dashboard = ({ user }: { user: User }) => {
       
       if (!accRes.ok || !transRes.ok) {
         console.error('Failed to fetch account or transactions');
+        showToast('Failed to load account data', 'error');
         return;
       }
       
@@ -952,6 +955,9 @@ const Dashboard = ({ user }: { user: User }) => {
       setTransactions(transactionsData);
     } catch (error) {
       console.error('Error fetching data:', error);
+      showToast('Failed to connect to server', 'error');
+    } finally {
+      setDataLoading(false);
     }
   };
 
@@ -1002,7 +1008,7 @@ const Dashboard = ({ user }: { user: User }) => {
     pdf.save(`Savings_Summary_${user.name}.pdf`);
   };
 
-  if (!account) return <div className="pt-24 text-center">Loading account...</div>;
+  if (dataLoading) return <div className="pt-24 text-center">Loading account...</div>;
 
   const chartData = transactions.slice(0, 10).reverse().map(t => ({
     date: new Date(t.date).toLocaleDateString(),
@@ -1230,7 +1236,12 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
   });
 
   // Fetch latest user data to get updated card status from admin approval
+  // Only run once on mount, not on every render
+  const initialFetchDone = useRef(false);
   useEffect(() => {
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+    
     const fetchLatestUser = async () => {
       try {
         const res = await fetch(`/api/user/${user.id}`);
@@ -1251,7 +1262,7 @@ const ProfilePage = ({ user, onUpdate }: { user: User; onUpdate: (user: User) =>
       }
     };
     fetchLatestUser();
-  }, [user.id, onUpdate]);
+  }, [user.id]); // Only re-run if user.id changes
 
   const handleCardPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1908,15 +1919,19 @@ const RegionalAdminDashboard = ({ user }: { user: User }) => {
                     <TrendingUp className="w-5 h-5 text-emerald-600" /> Regional Savings Growth
                   </h4>
                   <div className="h-80">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={analytics.transactions.map((t: any) => ({ date: new Date(t.date).toLocaleDateString(), amount: t.amount }))}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                        <XAxis dataKey="date" fontSize={10} />
-                        <YAxis fontSize={10} />
-                        <Tooltip />
-                        <Line type="monotone" dataKey="amount" stroke="#059669" strokeWidth={3} />
-                      </LineChart>
-                    </ResponsiveContainer>
+                    {analytics?.transactions ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={analytics.transactions.map((t: any) => ({ date: new Date(t.date).toLocaleDateString(), amount: t.amount }))}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                          <XAxis dataKey="date" fontSize={10} />
+                          <YAxis fontSize={10} />
+                          <Tooltip />
+                          <Line type="monotone" dataKey="amount" stroke="#059669" strokeWidth={3} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-stone-400">No data available</div>
+                    )}
                   </div>
                 </div>
 
@@ -1925,25 +1940,29 @@ const RegionalAdminDashboard = ({ user }: { user: User }) => {
                     <PieChartIcon className="w-5 h-5 text-purple-600" /> Application Status
                   </h4>
                   <div className="h-80">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={analytics.applications.map((a: any) => ({ name: a.status, value: a.count }))}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={60}
-                          outerRadius={80}
-                          paddingAngle={5}
-                          dataKey="value"
-                        >
-                          {analytics.applications.map((entry: any, index: number) => (
-                            <Cell key={`cell-${index}`} fill={['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'][index % 5]} />
-                          ))}
-                        </Pie>
-                        <Tooltip />
-                        <Legend />
-                      </PieChart>
-                    </ResponsiveContainer>
+                    {analytics?.applications ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={analytics.applications.map((a: any) => ({ name: a.status, value: a.count }))}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={60}
+                            outerRadius={80}
+                            paddingAngle={5}
+                            dataKey="value"
+                          >
+                            {analytics.applications.map((entry: any, index: number) => (
+                              <Cell key={`cell-${index}`} fill={['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444'][index % 5]} />
+                            ))}
+                          </Pie>
+                          <Tooltip />
+                          <Legend />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-stone-400">No data available</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2391,8 +2410,17 @@ const MasterAdminDashboard = () => {
 
   const handleDeleteBranch = async (id: number) => {
     if (confirm('Are you sure you want to delete this branch? All associated data will be lost.')) {
-      await fetch(`/api/admin/master/branches/${id}`, { method: 'DELETE' });
-      fetchData();
+      try {
+        const res = await fetch(`/api/admin/master/branches/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast('Branch deleted successfully', 'success');
+          fetchData();
+        } else {
+          showToast('Failed to delete branch', 'error');
+        }
+      } catch (error) {
+        showToast('Error deleting branch', 'error');
+      }
     }
   };
 
@@ -2469,6 +2497,7 @@ const MasterAdminDashboard = () => {
       try {
         const res = await fetch(`/api/admin/master/officers/${id}`, { method: 'DELETE' });
         if (res.ok) {
+          showToast('Officer deleted successfully', 'success');
           fetchData();
         } else {
           showToast('Failed to delete officer', 'error');
@@ -2524,9 +2553,17 @@ const MasterAdminDashboard = () => {
 
   const handleDeleteUser = async (id: number) => {
     if (confirm('CRITICAL: Are you sure you want to delete this user? All their data (savings, donations, card) will be permanently removed.')) {
-      await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
-      showToast('User deleted', 'success');
-      fetchData();
+      try {
+        const res = await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast('User deleted successfully', 'success');
+          fetchData();
+        } else {
+          showToast('Failed to delete user', 'error');
+        }
+      } catch (error) {
+        showToast('Error deleting user', 'error');
+      }
     }
   };
 
@@ -2861,15 +2898,19 @@ const MasterAdminDashboard = () => {
                     <TrendingUp className="w-5 h-5 text-emerald-600" /> Donation Growth
                   </h4>
                   <div className="h-80">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={analytics.donations.map((d: any) => ({ date: new Date(d.date).toLocaleDateString(), amount: d.amount }))}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                        <XAxis dataKey="date" fontSize={10} />
-                        <YAxis fontSize={10} />
-                        <Tooltip />
-                        <Line type="monotone" dataKey="amount" stroke="#059669" strokeWidth={3} />
-                      </LineChart>
-                    </ResponsiveContainer>
+                    {analytics?.donations ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={analytics.donations.map((d: any) => ({ date: new Date(d.date).toLocaleDateString(), amount: d.amount }))}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                          <XAxis dataKey="date" fontSize={10} />
+                          <YAxis fontSize={10} />
+                          <Tooltip />
+                          <Line type="monotone" dataKey="amount" stroke="#059669" strokeWidth={3} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-stone-400">No data available</div>
+                    )}
                   </div>
                 </div>
 
@@ -3407,6 +3448,7 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
   // User Profile Modal state
   const [selectedProfile, setSelectedProfile] = useState<any | null>(null);
   const [showPollModal, setShowPollModal] = useState(false);
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
   const [pollQuestion, setPollQuestion] = useState('');
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -3474,6 +3516,8 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [privateChatUser, setPrivateChatUser] = useState<any | null>(null);
+  const [showInbox, setShowInbox] = useState(false);
+  const [inboxMessages, setInboxMessages] = useState<any[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -3504,6 +3548,20 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
     }
   };
 
+  const fetchInbox = async () => {
+    try {
+      const res = await fetch(`/api/messages/private/${user.id}`);
+      const data = await res.json();
+      // Combine received and sent, sort by timestamp
+      const allMessages = [...(data.received || []), ...(data.sent || [])].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
+      setInboxMessages(allMessages);
+    } catch (error) {
+      console.error('Inbox fetch error:', error);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) return;
     
@@ -3511,10 +3569,18 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
     const wsUrl = `${protocol}//${window.location.host}`;
     const ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => console.log('Connected to Chat');
+    ws.onopen = () => {
+      console.log('Connected to Chat');
+      // Register this user with the WebSocket connection
+      ws.send(JSON.stringify({ type: 'register', userId: user.id }));
+    };
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'history') {
+        if (!data.messages) {
+          console.warn('Received history message without messages array');
+          return;
+        }
         const parsedMessages = data.messages.map((m: any) => ({
           ...m,
           reactions: typeof m.reactions === 'string' ? JSON.parse(m.reactions) : m.reactions,
@@ -3529,6 +3595,10 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           }
         });
       } else if (data.type === 'private_history') {
+        if (!data.messages) {
+          console.warn('Received private_history message without messages array');
+          return;
+        }
         const parsedMessages = data.messages.map((m: any) => ({
           ...m,
           reactions: typeof m.reactions === 'string' ? JSON.parse(m.reactions) : m.reactions,
@@ -3564,6 +3634,10 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, message: data.newMessage } : m));
       } else if (data.type === 'poll_update') {
         setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, poll: data.poll } : m));
+      } else if (data.type === 'unread_private') {
+        // Handle unread private messages - add to inbox/notification
+        console.log('Unread private messages:', data.messages);
+        // Could show a notification or update an inbox counter here
       }
     };
 
@@ -3802,12 +3876,21 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           <X className="w-6 h-6" />
         </button>
         <div className="text-center">
-          <h2 className="text-lg font-bold">{privateChatUser ? privateChatUser.name : 'Community Chat'}</h2>
+          <h2 className="text-lg font-bold">
+            {showInbox ? 'Inbox' : (privateChatUser ? privateChatUser.name : 'Community Chat')}
+          </h2>
           <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">
-            {privateChatUser ? privateChatUser.phone || privateChatUser.email : 'ASMIN Uganda'}
+            {showInbox ? 'Private Messages' : (privateChatUser ? privateChatUser.phone || privateChatUser.email : 'ASMIN Uganda')}
           </p>
         </div>
-        {privateChatUser ? (
+        {showInbox ? (
+          <button 
+            onClick={() => setShowInbox(false)}
+            className="p-2 -mr-2 text-stone-400 hover:text-emerald-600"
+          >
+            <MessageSquare className="w-6 h-6" />
+          </button>
+        ) : privateChatUser ? (
           <button 
             onClick={() => {
               setPrivateChatUser(null);
@@ -3819,9 +3902,18 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
             <Users className="w-6 h-6" />
           </button>
         ) : (
-          <button onClick={() => setShowSearch(!showSearch)} className="p-2 -mr-2 text-stone-400">
-            <Search className="w-6 h-6" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button 
+              onClick={() => { fetchInbox(); setShowInbox(true); }}
+              className="p-2 text-stone-400 hover:text-emerald-600"
+              title="Inbox"
+            >
+              <Bell className="w-6 h-6" />
+            </button>
+            <button onClick={() => setShowSearch(!showSearch)} className="p-2 -mr-2 text-stone-400">
+              <Search className="w-6 h-6" />
+            </button>
+          </div>
         )}
       </div>
 
@@ -3868,12 +3960,67 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
       )}
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 no-scrollbar">
-        {messages.map((msg, idx) => {
+      {showInbox ? (
+        <div className="flex-1 overflow-y-auto p-4">
+          {inboxMessages.length === 0 ? (
+            <div className="text-center py-12 text-stone-500">
+              <MessageSquare className="w-12 h-12 mx-auto mb-4 text-stone-300" />
+              <p>No private messages yet</p>
+              <p className="text-sm mt-2">Start a private conversation by searching for a user</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {inboxMessages.map((msg) => {
+                const isReceived = msg.private_to === user.id;
+                const otherUserId = isReceived ? msg.user_id : msg.private_to;
+                const otherUserName = isReceived ? msg.user_name : 'You';
+                const isMe = msg.user_id === user.id;
+                
+                return (
+                  <div 
+                    key={msg.id}
+                    onClick={() => {
+                      // Find the other user and start private chat
+                      fetch(`/api/users/search?q=${encodeURIComponent(otherUserName)}`).then(res => res.json()).then(data => {
+                        if (data.users && data.users.length > 0) {
+                          const otherUser = data.users.find((u: any) => u.name === otherUserName || u.id === otherUserId);
+                          if (otherUser) {
+                            setPrivateChatUser(otherUser);
+                            setShowInbox(false);
+                          }
+                        }
+                      });
+                    }}
+                    className="p-4 bg-white rounded-xl shadow-sm border border-stone-100 hover:bg-stone-50 cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
+                        <UserIcon className="w-5 h-5 text-emerald-600" />
+                      </div>
+                      <div className="flex-1">
+                        <p className="font-bold text-stone-900">{otherUserName}</p>
+                        <p className="text-xs text-stone-500">{new Date(msg.timestamp).toLocaleString()}</p>
+                      </div>
+                      {isReceived && (
+                        <span className="bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded-full">New</span>
+                      )}
+                    </div>
+                    <p className="text-stone-600 text-sm line-clamp-2">{msg.message}</p>
+                    {msg.image && <p className="text-xs text-emerald-600 mt-1">📷 Image</p>}
+                    {msg.document && <p className="text-xs text-emerald-600 mt-1">📄 Document</p>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 no-scrollbar">
+        {(messages || []).map((msg, idx) => {
           const isMe = msg.user_id === user.id;
           const reactions = msg.reactions || {};
           const readBy = msg.read_by || [];
-          const isReadByOthers = readBy.some((id: number) => id !== user.id);
+          const isReadByOthers = readBy.some((id: string) => id !== user.id);
 
           return (
             <div key={msg.id || idx} className="relative">
@@ -4074,7 +4221,7 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
                     </div>
                   )}
 
-                  {msg.poll && (
+                  {msg.poll && msg.poll.options && (
                     <div className={cn(
                       "p-3 rounded-xl mb-2 border",
                       isMe ? "bg-emerald-700/30 border-emerald-500/30" : "bg-white border-stone-200"
@@ -4207,8 +4354,10 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           </div>
         )}
       </div>
+      )}
 
       {/* Input Area */}
+      {!showInbox && (
       <div className="p-4 bg-white border-t border-stone-100 sticky bottom-0 z-10">
         {replyingTo && (
           <motion.div 
@@ -4271,45 +4420,54 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           className="hidden" 
         />
         <form onSubmit={sendMessage} className="flex items-end gap-2">
-          <div className="flex items-center gap-1 mb-1">
+          <div className="relative">
             <button 
               type="button"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setShowAttachmentMenu(!showAttachmentMenu)}
               className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
+              title="Add attachments"
             >
-              <ImageIcon className="w-5 h-5" />
+              <Plus className="w-5 h-5" />
             </button>
-            <button 
-              type="button"
-              onClick={() => docInputRef.current?.click()}
-              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
-            >
-              <FileText className="w-5 h-5" />
-            </button>
-            <button 
-              type="button"
-              onClick={() => videoInputRef.current?.click()}
-              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
-              title="Video (max 5MB)"
-            >
-              <Video className="w-5 h-5" />
-            </button>
-            <button 
-              type="button"
-              onClick={() => audioInputRef.current?.click()}
-              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
-              title="Audio"
-            >
-              <Mic className="w-5 h-5" />
-            </button>
-            <button 
-              type="button"
-              onClick={() => setShowPollModal(true)}
-              className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
-              title="Create Poll"
-            >
-              <Vote className="w-5 h-5" />
-            </button>
+            {showAttachmentMenu && (
+              <div className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-stone-200 py-2 min-w-[160px] z-10">
+                <button 
+                  type="button"
+                  onClick={() => { fileInputRef.current?.click(); setShowAttachmentMenu(false); }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-stone-100 flex items-center gap-2"
+                >
+                  <ImageIcon className="w-4 h-4" /> Image
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => { docInputRef.current?.click(); setShowAttachmentMenu(false); }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-stone-100 flex items-center gap-2"
+                >
+                  <FileText className="w-4 h-4" /> Document
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => { videoInputRef.current?.click(); setShowAttachmentMenu(false); }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-stone-100 flex items-center gap-2"
+                >
+                  <Video className="w-4 h-4" /> Video (max 5MB)
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => { audioInputRef.current?.click(); setShowAttachmentMenu(false); }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-stone-100 flex items-center gap-2"
+                >
+                  <Mic className="w-4 h-4" /> Audio
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => { setShowPollModal(true); setShowAttachmentMenu(false); }}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-stone-100 flex items-center gap-2"
+                >
+                  <Vote className="w-4 h-4" /> Create Poll
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex-1 relative">
             <textarea 
@@ -4341,6 +4499,8 @@ const ChatRoom = ({ user, isOpen, onClose }: { user: User; isOpen: boolean; onCl
           </button>
         </form>
       </div>
+      )}
+
       {/* Preview Modal */}
       <AnimatePresence>
         {previewItem && (
