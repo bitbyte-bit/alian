@@ -7,6 +7,23 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcrypt";
+import webpush from "web-push";
+
+// Load environment variables
+import dotenv from "dotenv";
+dotenv.config();
+
+// VAPID keys for Web Push
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY || "BIjOSlLO8RFeIkCoB_UPvDhBWJYdBvTHHBzBxALCb_NWZOPULCOnb3d3TIE9YbB6K5xjMQC63TCkDWZ_YSo-TiY";
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY || "aWYQY5oAP6BGQNjlX5y9_FFDbB4X4JLcECJQzwzUi4U";
+const vapidSubject = process.env.VAPID_SUBJECT || "mailto:admin@asmi.org";
+
+// Configure web-push
+webpush.setVapidDetails(
+  vapidSubject,
+  vapidPublicKey,
+  vapidPrivateKey
+);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -179,6 +196,22 @@ db.exec(`
     timestamp TEXT,
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    subscription TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS unread_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    count INTEGER DEFAULT 0,
+    last_updated TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `);
 // Migration: Add missing columns if they don't exist
 ensureColumn('users', 'phone', 'TEXT');
@@ -252,6 +285,21 @@ async function startServer() {
                     const timestamp = new Date().toISOString();
                     const info = db.prepare("INSERT INTO chat_messages (user_id, user_name, user_photo, message, image, document, document_name, timestamp, reactions, read_by, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                         .run(userId, userName, userPhoto || null, message, image || null, document || null, documentName || null, timestamp, '{}', JSON.stringify([userId]), replyTo ? JSON.stringify(replyTo) : null);
+                    
+                    // Send push notifications to all users except the sender
+                    const allUsers = db.prepare('SELECT DISTINCT user_id FROM chat_messages').all();
+                    for (const u of allUsers) {
+                        if (u.user_id !== userId) {
+                            sendPushNotification(u.user_id, `New message from ${userName}`, message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+                            // Update unread count
+                            const existing = db.prepare('SELECT count FROM unread_messages WHERE user_id = ?').get(u.user_id);
+                            if (existing) {
+                                db.prepare('UPDATE unread_messages SET count = count + 1, last_updated = CURRENT_TIMESTAMP WHERE user_id = ?').run(u.user_id);
+                            } else {
+                                db.prepare('INSERT INTO unread_messages (user_id, count) VALUES (?, 1)').run(u.user_id);
+                            }
+                        }
+                    }
                     const newMessage = {
                         id: info.lastInsertRowid,
                         user_id: userId,
@@ -363,11 +411,29 @@ async function startServer() {
     // --- API Routes ---
     // Auth (Simplified for demo)
     app.post("/api/auth/register", async (req, res) => {
-        const { email, password, name } = req.body;
+        const { email, password, name, phone } = req.body;
+        
+        // Server-side password validation
+        if (!password || password.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+        }
+        if (!/[A-Z]/.test(password)) {
+            return res.status(400).json({ error: 'Password must contain at least one uppercase letter' });
+        }
+        if (!/[a-z]/.test(password)) {
+            return res.status(400).json({ error: 'Password must contain at least one lowercase letter' });
+        }
+        if (!/\d/.test(password)) {
+            return res.status(400).json({ error: 'Password must contain at least one digit' });
+        }
+        if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+            return res.status(400).json({ error: 'Password must contain at least one symbol (!@#$%^&* etc.)' });
+        }
+        
         try {
             const userId = uuidv4();
             const hashedPassword = await bcrypt.hash(password, 10);
-            db.prepare("INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)").run(userId, email, hashedPassword, name);
+            db.prepare("INSERT INTO users (id, email, password, name, phone) VALUES (?, ?, ?, ?, ?)").run(userId, email, hashedPassword, name, phone || '');
             db.prepare("INSERT INTO accounts (user_id) VALUES (?)").run(userId);
             res.json({ success: true, userId });
         }
@@ -400,6 +466,91 @@ async function startServer() {
             res.status(401).json({ error: "Invalid credentials" });
         }
     });
+    
+    // Push Notification API
+    app.get('/api/push/vapidPublicKey', (req, res) => {
+        res.json({ publicKey: vapidPublicKey });
+    });
+    
+    app.post('/api/push/subscribe', async (req, res) => {
+        const { userId, subscription } = req.body;
+        try {
+            // Store the subscription in the database
+            const subscriptionStr = JSON.stringify(subscription);
+            
+            // Check if subscription already exists
+            const existing = db.prepare('SELECT id FROM push_subscriptions WHERE user_id = ? AND subscription = ?').get(userId, subscriptionStr);
+            
+            if (!existing) {
+                db.prepare('INSERT INTO push_subscriptions (user_id, subscription) VALUES (?, ?)').run(userId, subscriptionStr);
+            }
+            
+            res.json({ success: true });
+        } catch (e) {
+            console.error('Error saving subscription:', e);
+            res.status(500).json({ error: 'Failed to save subscription' });
+        }
+    });
+    
+    app.post('/api/push/unsubscribe', async (req, res) => {
+        const { userId, subscription } = req.body;
+        try {
+            const subscriptionStr = JSON.stringify(subscription);
+            db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND subscription = ?').run(userId, subscriptionStr);
+            res.json({ success: true });
+        } catch (e) {
+            console.error('Error removing subscription:', e);
+            res.status(500).json({ error: 'Failed to remove subscription' });
+        }
+    });
+    
+    // Get/Update unread message count
+    app.get('/api/messages/unread-count', (req, res) => {
+        const userId = req.query.userId;
+        try {
+            const result = db.prepare('SELECT count FROM unread_messages WHERE user_id = ?').get(userId);
+            res.json({ count: result ? result.count : 0 });
+        } catch (e) {
+            res.json({ count: 0 });
+        }
+    });
+    
+    app.post('/api/messages/unread-count', (req, res) => {
+        const { userId, count } = req.body;
+        try {
+            const existing = db.prepare('SELECT id FROM unread_messages WHERE user_id = ?').get(userId);
+            if (existing) {
+                db.prepare('UPDATE unread_messages SET count = ?, last_updated = CURRENT_TIMESTAMP WHERE user_id = ?').run(count, userId);
+            } else {
+                db.prepare('INSERT INTO unread_messages (user_id, count) VALUES (?, ?)').run(userId, count);
+            }
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: 'Failed to update count' });
+        }
+    });
+    
+    // Function to send push notification to a user
+    const sendPushNotification = async (userId, title, message) => {
+        try {
+            const subscriptions = db.prepare('SELECT subscription FROM push_subscriptions WHERE user_id = ?').all(userId);
+            
+            for (const sub of subscriptions) {
+                const subscription = JSON.parse(sub.subscription);
+                await webpush.sendNotification(subscription, JSON.stringify({
+                    title,
+                    message,
+                    icon: '/icon-192.png'
+                }));
+            }
+        } catch (e) {
+            console.error('Error sending push notification:', e);
+            // Remove invalid subscriptions
+            if (e.statusCode === 410) {
+                db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').run(userId);
+            }
+        }
+    };
     // Profile Management
     app.post("/api/profile/update", async (req, res) => {
         const { userId, name, email, phone, bio, photo, currentPassword, newPassword } = req.body;

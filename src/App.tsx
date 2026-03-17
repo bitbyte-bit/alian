@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, createContext, useContext } from 'r
 import { BrowserRouter, Routes, Route, Link, useNavigate, Navigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { InstallBanner } from './components/InstallBanner';
+import { usePushNotifications } from './hooks/usePushNotifications';
 
 // Toast Context
 const ToastContext = createContext<{
@@ -130,7 +131,7 @@ const ConfirmationDialog = ({
   );
 };
 
-const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void }) => {
+const Navbar = ({ user, onLogout, unreadMessageCount = 0 }: { user: User | null; onLogout: () => void; unreadMessageCount?: number }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -169,7 +170,16 @@ const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void })
             <Link to="/donations" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Donations</Link>
             <Link to="/branches" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Branches</Link>
             <Link to="/events" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Events</Link>
-            {user && <Link to="/chat" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Community Chat</Link>}
+            {user && (
+              <Link to="/chat" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors relative">
+                Community Chat
+                {unreadMessageCount > 0 && (
+                  <span className="absolute -top-1 -right-3 w-4 h-4 bg-red-500 text-white text-[10px] flex items-center justify-center rounded-full border-2 border-white">
+                    {unreadMessageCount > 9 ? '9+' : unreadMessageCount}
+                  </span>
+                )}
+              </Link>
+            )}
             {user ? (
               <>
                 {user.role === 'user' && <Link to="/dashboard" className="text-stone-600 hover:text-emerald-700 font-medium transition-colors">Savings</Link>}
@@ -3200,13 +3210,53 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
   const [isLogin, setIsLogin] = useState(true);
   const [formData, setFormData] = useState({ email: '', password: '', name: '', phone: '' });
   const [error, setError] = useState('');
+  const [passwordError, setPasswordError] = useState('');
   const [registeredUser, setRegisteredUser] = useState<User | null>(null);
   const navigate = useNavigate();
   const { showToast } = useToast();
 
+  // Password validation function
+  const validatePassword = (password: string): string => {
+    if (password.length < 6) {
+      return 'Password must be at least 6 characters long';
+    }
+    if (!/[A-Z]/.test(password)) {
+      return 'Password must contain at least one uppercase letter';
+    }
+    if (!/[a-z]/.test(password)) {
+      return 'Password must contain at least one lowercase letter';
+    }
+    if (!/\d/.test(password)) {
+      return 'Password must contain at least one digit';
+    }
+    if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+      return 'Password must contain at least one symbol (!@#$%^&* etc.)';
+    }
+    return '';
+  };
+
+  const handlePasswordChange = (password: string) => {
+    setFormData({...formData, password});
+    if (!isLogin) {
+      // Only validate on registration
+      const error = validatePassword(password);
+      setPasswordError(error);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    
+    // Validate password on registration
+    if (!isLogin) {
+      const validationError = validatePassword(formData.password);
+      if (validationError) {
+        setPasswordError(validationError);
+        return;
+      }
+    }
+    
     const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -3223,9 +3273,18 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
       } else {
         setRegisteredUser(data.user);
         showToast('Registration successful! Please download your ID card and then login.', 'success');
+        // Auto-switch to login after successful registration
+        setIsLogin(true);
+        setFormData({ email: formData.email, password: '', name: '', phone: '' });
       }
     } else {
-      setError(data.error || 'Something went wrong');
+      // If login fails with invalid credentials, suggest signup
+      if (isLogin && (data.error === 'Invalid credentials' || data.error?.includes('credentials'))) {
+        setError('Account not found. Please create an account.');
+        setIsLogin(false);
+      } else {
+        setError(data.error || 'Something went wrong');
+      }
     }
   };
 
@@ -3287,8 +3346,14 @@ const AuthPage = ({ onLogin }: { onLogin: (user: User) => void }) => {
                 required
                 className="w-full px-4 py-3 rounded-xl border border-stone-200 outline-none focus:ring-2 focus:ring-emerald-500"
                 value={formData.password}
-                onChange={e => setFormData({...formData, password: e.target.value})}
+                onChange={e => handlePasswordChange(e.target.value)}
               />
+              {!isLogin && passwordError && (
+                <p className="text-red-500 text-xs mt-1">{passwordError}</p>
+              )}
+              {!isLogin && !passwordError && formData.password && (
+                <p className="text-green-500 text-xs mt-1">Password meets requirements</p>
+              )}
             </div>
             {error && <p className="text-red-500 text-sm">{error}</p>}
             <button type="submit" className="btn-primary w-full py-4 text-lg">
@@ -4472,6 +4537,29 @@ export default function App() {
   });
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+
+  // Subscribe to push notifications
+  usePushNotifications(user?.id);
+
+  // Fetch unread message count
+  useEffect(() => {
+    if (user?.id) {
+      const fetchUnreadCount = async () => {
+        try {
+          const res = await fetch(`/api/messages/unread-count?userId=${user.id}`);
+          const data = await res.json();
+          setUnreadMessageCount(data.count || 0);
+        } catch (e) {
+          console.error('Failed to fetch unread count:', e);
+        }
+      };
+      fetchUnreadCount();
+      // Poll every 30 seconds
+      const interval = setInterval(fetchUnreadCount, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [user?.id]);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -4504,7 +4592,7 @@ export default function App() {
       <BrowserRouter>
         <div className="min-h-screen bg-[#fdfcf9]">
           {user && <NotificationBanner user={user} />}
-          <Navbar user={user} onLogout={handleLogout} />
+          <Navbar user={user} onLogout={handleLogout} unreadMessageCount={unreadMessageCount} />
           <InstallBanner />
           <main className="pb-24 md:pb-0">
             <Routes>

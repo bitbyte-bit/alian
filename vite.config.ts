@@ -12,7 +12,7 @@ export default defineConfig(({mode}) => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['icon-192.png', 'icon-512.png'],
+        includeAssets: ['icon-192.png', 'icon-512.png', 'app.png'],
         manifest: {
           name: 'Arise and Shine Ministries International',
           short_name: 'ASMI',
@@ -70,6 +70,9 @@ export default defineConfig(({mode}) => {
               }
             }
           ]
+        },
+        devOptions: {
+          enabled: true
         }
       })
     ],

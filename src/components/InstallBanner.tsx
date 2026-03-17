@@ -1,4 +1,4 @@
-import {useState, useEffect} from 'react';
+import {useState, useEffect, useCallback} from 'react';
 import {X, Download, Monitor} from 'lucide-react';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -11,20 +11,26 @@ export function InstallBanner() {
   const [showBanner, setShowBanner] = useState(false);
   const [isInstalled, setIsInstalled] = useState(false);
   const [isDismissed, setIsDismissed] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
+
+  const checkIfInstalled = useCallback(() => {
+    // Check if the app is already installed using CSS media query
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
+    const isInWebAppMode = (window.navigator as {standalone?: boolean}).standalone === true;
+    const isInStandaloneMode = window.matchMedia('(display-mode: minimal-ui)').matches;
+    
+    if (isStandalone || isInWebAppMode || isInStandaloneMode) {
+      setIsInstalled(true);
+      setShowBanner(false);
+      return true;
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
-    // Check if the app is already installed using CSS media query
-    const checkIfInstalled = () => {
-      const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
-      const isInWebAppMode = (window.navigator as {standalone?: boolean}).standalone === true;
-      
-      if (isStandalone || isInWebAppMode) {
-        setIsInstalled(true);
-        setShowBanner(false);
-        return true;
-      }
-      return false;
-    };
+    // Check if iOS
+    const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+    setIsIOS(iOS);
 
     // Initial check
     if (checkIfInstalled()) {
@@ -33,18 +39,30 @@ export function InstallBanner() {
 
     // Check if user previously dismissed the banner
     const dismissed = localStorage.getItem('pwa-install-banner-dismissed');
-    if (dismissed) {
-      setIsDismissed(true);
-      return;
+    const dismissedTime = localStorage.getItem('pwa-install-banner-dismissed-time');
+    
+    // If dismissed, only show again after 24 hours
+    if (dismissed && dismissedTime) {
+      const dismissedDate = parseInt(dismissedTime);
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000;
+      
+      if (now - dismissedDate < oneDay) {
+        setIsDismissed(true);
+        return;
+      } else {
+        // Reset after 24 hours
+        localStorage.removeItem('pwa-install-banner-dismissed');
+        localStorage.removeItem('pwa-install-banner-dismissed-time');
+      }
     }
 
-    // Listen for the beforeinstallprompt event
+    // Listen for the beforeinstallprompt event (Chrome, Edge, Opera)
     const handleBeforeInstallPrompt = (e: Event) => {
       // Prevent Chrome 67 and earlier from automatically showing the prompt
       e.preventDefault();
       // Store the event for later use
       setDeferredPrompt(e as BeforeInstallPromptEvent);
-      
       // Show our custom banner
       setShowBanner(true);
     };
@@ -57,18 +75,6 @@ export function InstallBanner() {
       setDeferredPrompt(null);
     };
 
-    // Check again after a short delay (in case the media query updates)
-    const timeoutId = setTimeout(() => {
-      if (!checkIfInstalled() && !deferredPrompt) {
-        // Try to detect if we can prompt - some browsers don't fire beforeinstallprompt
-        // We'll show the banner anyway with a manual trigger
-        setShowBanner(true);
-      }
-    }, 3000);
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    window.addEventListener('appinstalled', handleAppInstalled);
-
     // Also listen for display-mode changes
     const mediaQuery = window.matchMedia('(display-mode: standalone)');
     const handleDisplayModeChange = (e: MediaQueryListEvent) => {
@@ -79,34 +85,59 @@ export function InstallBanner() {
     };
     mediaQuery.addEventListener('change', handleDisplayModeChange);
 
+    // Also check minimal-ui mode
+    const mediaQueryMinimal = window.matchMedia('(display-mode: minimal-ui)');
+    const handleDisplayModeChangeMinimal = (e: MediaQueryListEvent) => {
+      if (e.matches) {
+        setIsInstalled(true);
+        setShowBanner(false);
+      }
+    };
+    mediaQueryMinimal.addEventListener('change', handleDisplayModeChangeMinimal);
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    // Show banner for iOS users with a prompt to add to home screen
+    if (iOS) {
+      // iOS doesn't fire beforeinstallprompt, so we show instructions
+      setShowBanner(true);
+    }
+
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
       mediaQuery.removeEventListener('change', handleDisplayModeChange);
-      clearTimeout(timeoutId);
+      mediaQueryMinimal.removeEventListener('change', handleDisplayModeChangeMinimal);
     };
-  }, [deferredPrompt]);
+  }, [checkIfInstalled]);
 
   const handleInstall = async () => {
-    if (!deferredPrompt) {
-      // If no deferred prompt, try to trigger the browser's install prompt
-      // This handles browsers that don't fire beforeinstallprompt
-      return;
+    if (deferredPrompt) {
+      // Show the install prompt (Android/Chrome)
+      await deferredPrompt.prompt();
+      
+      // Wait for the user to respond
+      const {outcome} = await deferredPrompt.userChoice;
+      
+      if (outcome === 'accepted') {
+        setShowBanner(false);
+        setIsInstalled(true);
+      }
+      
+      // Clear the deferred prompt
+      setDeferredPrompt(null);
+    } else if (isIOS) {
+      // For iOS, show instructions to add to home screen
+      alert('To install this app:\n\n1. Tap the Share button in Safari\n2. Tap "Add to Home Screen"\n3. Tap "Add"');
+    } else {
+      // Try to find and click the install prompt programmatically
+      // This is a fallback for browsers that don't fire beforeinstallprompt
+      const installButtons = document.querySelectorAll('[data-pwa-install]');
+      if (installButtons.length > 0) {
+        (installButtons[0] as HTMLButtonElement).click();
+      }
     }
-
-    // Show the install prompt
-    await deferredPrompt.prompt();
-    
-    // Wait for the user to respond
-    const {outcome} = await deferredPrompt.userChoice;
-    
-    if (outcome === 'accepted') {
-      setShowBanner(false);
-      setIsInstalled(true);
-    }
-    
-    // Clear the deferred prompt
-    setDeferredPrompt(null);
   };
 
   const handleDismiss = () => {
@@ -114,6 +145,7 @@ export function InstallBanner() {
     setIsDismissed(true);
     // Remember that user dismissed the banner for this session
     localStorage.setItem('pwa-install-banner-dismissed', 'true');
+    localStorage.setItem('pwa-install-banner-dismissed-time', Date.now().toString());
   };
 
   // Don't show if installed or dismissed
@@ -130,10 +162,12 @@ export function InstallBanner() {
           </div>
           <div className="min-w-0">
             <h3 className="font-semibold text-sm md:text-base truncate">
-              Install ASMI App
+              {isIOS ? 'Add ASMI to Home Screen' : 'Install ASMI App'}
             </h3>
             <p className="text-xs md:text-sm text-white/80 truncate">
-              Add to home screen for quick access and offline support
+              {isIOS 
+                ? 'Tap Share, then Add to Home Screen for quick access' 
+                : 'Add to home screen for quick access and offline support'}
             </p>
           </div>
         </div>
@@ -144,7 +178,7 @@ export function InstallBanner() {
             className="flex items-center gap-2 px-4 py-2 bg-white text-[#1e3a5f] rounded-lg font-medium text-sm hover:bg-white/90 transition-colors"
           >
             <Download className="w-4 h-4" />
-            <span className="hidden sm:inline">Install</span>
+            <span className="hidden sm:inline">{isIOS ? 'How to Install' : 'Install'}</span>
           </button>
           <button
             onClick={handleDismiss}
