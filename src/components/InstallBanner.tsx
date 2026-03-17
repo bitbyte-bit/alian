@@ -10,7 +10,6 @@ export function InstallBanner() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [showBanner, setShowBanner] = useState(false);
   const [isInstalled, setIsInstalled] = useState(false);
-  const [isDismissed, setIsDismissed] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
 
   const checkIfInstalled = useCallback(() => {
@@ -37,25 +36,17 @@ export function InstallBanner() {
       return;
     }
 
-    // Check if user previously dismissed the banner
-    const dismissed = localStorage.getItem('pwa-install-banner-dismissed');
-    const dismissedTime = localStorage.getItem('pwa-install-banner-dismissed-time');
-    
-    // If dismissed, only show again after 24 hours
-    if (dismissed && dismissedTime) {
-      const dismissedDate = parseInt(dismissedTime);
-      const now = Date.now();
-      const oneDay = 24 * 60 * 60 * 1000;
-      
-      if (now - dismissedDate < oneDay) {
-        setIsDismissed(true);
-        return;
-      } else {
-        // Reset after 24 hours
-        localStorage.removeItem('pwa-install-banner-dismissed');
-        localStorage.removeItem('pwa-install-banner-dismissed-time');
-      }
-    }
+    // Check if user previously dismissed the banner (no time restriction for showing)
+  // Original 24-hour restriction removed for testing
+  const dismissed = localStorage.getItem('pwa-install-banner-dismissed');
+  const dismissedTime = localStorage.getItem('pwa-install-banner-dismissed-time');
+  
+  // Always reset dismissal - banner will show every time for testing
+  // Remove the time restriction to always show the banner
+  if (dismissed && dismissedTime) {
+    localStorage.removeItem('pwa-install-banner-dismissed');
+    localStorage.removeItem('pwa-install-banner-dismissed-time');
+  }
 
     // Listen for the beforeinstallprompt event (Chrome, Edge, Opera)
     const handleBeforeInstallPrompt = (e: Event) => {
@@ -104,11 +95,23 @@ export function InstallBanner() {
       setShowBanner(true);
     }
 
+    // Fallback: Show banner after a short delay if beforeinstallprompt hasn't fired
+    // This helps in browsers that don't support the event
+    const fallbackTimer = setTimeout(() => {
+      if (!deferredPrompt && !iOS) {
+        // Check again if installed
+        if (!checkIfInstalled()) {
+          setShowBanner(true);
+        }
+      }
+    }, 3000); // Wait 3 seconds before showing fallback
+
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
       mediaQuery.removeEventListener('change', handleDisplayModeChange);
       mediaQueryMinimal.removeEventListener('change', handleDisplayModeChangeMinimal);
+      clearTimeout(fallbackTimer);
     };
   }, [checkIfInstalled]);
 
@@ -142,14 +145,13 @@ export function InstallBanner() {
 
   const handleDismiss = () => {
     setShowBanner(false);
-    setIsDismissed(true);
-    // Remember that user dismissed the banner for this session
+    // Remember that user dismissed the banner
     localStorage.setItem('pwa-install-banner-dismissed', 'true');
     localStorage.setItem('pwa-install-banner-dismissed-time', Date.now().toString());
   };
 
-  // Don't show if installed or dismissed
-  if (isInstalled || !showBanner || isDismissed) {
+  // Don't show if installed
+  if (isInstalled || !showBanner) {
     return null;
   }
 
