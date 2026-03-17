@@ -256,6 +256,7 @@ const Navbar = ({ user, onLogout }: { user: User | null; onLogout: () => void })
             {user?.role === 'master_admin' && (
               <Link to="/admin/master" onClick={() => setIsOpen(false)} className="text-lg font-medium text-emerald-600">Master Admin</Link>
             )}
+            <Link to="/" onClick={() => setIsOpen(false)} className="text-lg font-medium">Home</Link>
             <Link to="/donations" onClick={() => setIsOpen(false)} className="text-lg font-medium">Donations</Link>
             <Link to="/branches" onClick={() => setIsOpen(false)} className="text-lg font-medium">Branches</Link>
             <Link to="/events" onClick={() => setIsOpen(false)} className="text-lg font-medium">Events</Link>
@@ -901,12 +902,25 @@ const Dashboard = ({ user }: { user: User }) => {
   const summaryRef = useRef<HTMLDivElement>(null);
 
   const fetchData = async () => {
-    const [accRes, transRes] = await Promise.all([
-      fetch(`/api/account/${user.id}`),
-      fetch(`/api/transactions/${user.id}`)
-    ]);
-    setAccount(await accRes.json());
-    setTransactions(await transRes.json());
+    try {
+      const [accRes, transRes] = await Promise.all([
+        fetch(`/api/account/${user.id}`),
+        fetch(`/api/transactions/${user.id}`)
+      ]);
+      
+      if (!accRes.ok || !transRes.ok) {
+        console.error('Failed to fetch account or transactions');
+        return;
+      }
+      
+      const accountData = await accRes.json();
+      const transactionsData = await transRes.json();
+      
+      setAccount(accountData);
+      setTransactions(transactionsData);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    }
   };
 
   useEffect(() => { fetchData(); }, [user.id]);
@@ -3840,7 +3854,8 @@ const BottomNav = ({ user, onChatOpen }: { user: User | null; onChatOpen: () => 
   if (!user) return null;
 
   const navItems = [
-    { icon: Home, label: 'Home', path: '/dashboard' },
+    { icon: Home, label: 'Home', path: '/' },
+    { icon: PiggyBank, label: 'Savings', path: '/dashboard' },
     { icon: CalendarDays, label: 'Events', path: '/events' },
     { icon: MessageSquare, label: 'Chat', action: onChatOpen },
     { icon: ProfileIcon, label: 'Profile', path: '/profile' },
